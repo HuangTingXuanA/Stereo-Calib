@@ -1,0 +1,12 @@
+build/
+.kiro/
+.vscode/
+images/
+test_images/
+debug_img/
+dataset/
+runs/
+*.txt
+*.zip
+*.pt
+calibration.yaml

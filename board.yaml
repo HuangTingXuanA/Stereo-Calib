@@ -1,0 +1,33 @@
+%YAML:1.0
+---
+# 双目相机标定配置文件
+# 包含标定板参数和YOLO分割模型配置
+
+# 标定板参数
+board:
+   rows: 9
+   cols: 11
+   circle_spacing: 60.0
+
+# 标定板特征圆位置
+# ● ● ● ● ● ● ● ● ● ● ●
+# ● ● ● ● ● ● ● ● ● ● ●
+# ● ● ● ● ● 0 ● ● ● ● ●
+# ● ● ● ● ● ● ● ● ● ● ●
+# ● ● 1 ● ● ● ● ● 2 ● ●
+# ● ● ● ● ● ● ● ● ● ● ●
+# ● ● ● ● ● 3 4 ● ● ● ●
+# ● ● ● ● ● ● ● ● ● ● ●
+# ● ● ● ● ● ● ● ● ● ● ●
+anchor_circle:
+   - [2, 5] # 0
+   - [4, 2] # 1
+   - [4, 8] # 2
+   - [6, 5] # 3
+   - [6, 6] # 4
+
+# YOLO分割模型配置
+segmentor:
+   model_path: "models/calibration_board_seg_dynamic.onnx"
+   inference_size: 1024
+   confidence: 0.25
