@@ -235,7 +235,7 @@ bool StereoCalibrator::detectCircles() {
         bool left_valid = (left_ellipses.size() == static_cast<size_t>(expected_circles));
         bool right_valid = (right_ellipses.size() == static_cast<size_t>(expected_circles));
         
-        /**
+        
         if (!left_valid || !right_valid) {
             std::cout << "图像对 " << left_filename << ": "
                       << "L-" << left_ellipses.size() << "个椭圆 / "
@@ -253,20 +253,18 @@ bool StereoCalibrator::detectCircles() {
             }
             continue;
         }
-        */
-        // ========== 变量声明 ==========
-        std::vector<Ellipse> left_anchors, right_anchors;
 
         // 先查找锚点，用于调试可视化和圆心排序
+        std::vector<Ellipse> left_anchors, right_anchors;
         bool left_anchor_ok = findAnchors(left_ellipses, left_anchors);
         bool right_anchor_ok = findAnchors(right_ellipses, right_anchors);
 
-        // 保存调试图（现在带有了锚点信息）
-        saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
-                               "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
-        saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
-                               "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
-        if (!left_valid || !right_valid) continue;
+        // 保存调试图
+        // saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
+        //                        "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
+        // saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
+        //                        "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
+        // if (!left_valid || !right_valid) continue;
         
         // 检查锚点是否成功识别
         if (!left_anchor_ok || !right_anchor_ok) {
@@ -274,7 +272,7 @@ bool StereoCalibrator::detectCircles() {
             continue;
         }
 
-        // ========== 使用单应性排序圆心（第一性原理）==========
+        // ========== 使用单应性排序圆心 ==========
         // 原理：
         //   1. 用锚点计算单应性 H (模型 -> 图像)
         //   2. 用 H^-1 将所有检测点投影到模型空间
@@ -770,8 +768,6 @@ bool StereoCalibrator::saveResults(const std::string& yaml_path) {
     fs << "rms_left" << result_.rms_left;
     fs << "rms_right" << result_.rms_right;
     fs << "rms_stereo" << result_.rms_stereo;
-    fs << "reproj_err_left" << result_.reproj_err_left;
-    fs << "reproj_err_right" << result_.reproj_err_right;
     
     // 保存标定板参数
     fs << "board_rows" << board_config_.rows;
@@ -969,9 +965,6 @@ std::vector<cv::Point3f> StereoCalibrator::generateWorldCoordinates() {
  */
 void StereoCalibrator::computeReprojectionErrors() {
     std::vector<double> pair_3d_errors;
-    double total_reproj_left = 0, total_reproj_right = 0;
-    int total_points = 0;
-    int valid_idx = 0;
     
     std::cout << "\n=== 3D重建误差 (基于点云对齐分析) ===" << std::endl;
     
@@ -1065,24 +1058,9 @@ void StereoCalibrator::computeReprojectionErrors() {
         double pair_error = std::sqrt(sum_sq_err) / std::sqrt(static_cast<double>(N));
         pair_3d_errors.push_back(pair_error);
         
-        // 计算重投影误差摘要
-        std::vector<cv::Point2f> reproj_left, reproj_right;
-        cv::projectPoints(world_pts_3f, rvecs_left_[valid_idx], tvecs_left_[valid_idx],
-                         result_.camera_matrix_left, result_.dist_coeffs_left, reproj_left);
-        cv::projectPoints(world_pts_3f, rvecs_right_[valid_idx], tvecs_right_[valid_idx],
-                         result_.camera_matrix_right, result_.dist_coeffs_right, reproj_right);
-        
-        for (int j = 0; j < N; ++j) {
-            total_reproj_left += cv::norm(reproj_left[j] - left_pts[j]);
-            total_reproj_right += cv::norm(reproj_right[j] - right_pts[j]);
-        }
-        total_points += N;
-        
         std::string img_name = std::filesystem::path(image_pairs_[i].left_path).stem().string();
         std::cout << "  " << img_name << ": " << std::fixed << std::setprecision(4) 
-                  << pair_error << " mm" << std::endl;
-        
-        valid_idx++;
+                   << pair_error << " mm" << std::endl;
     }
     
     // 最终总体误差
@@ -1092,14 +1070,11 @@ void StereoCalibrator::computeReprojectionErrors() {
         double rms_3d = std::sqrt(sum_sq / pair_3d_errors.size());
         std::cout << "最终双目重建RMS误差: " << std::fixed << std::setprecision(4) << rms_3d << " mm" << std::endl;
     }
-    
-    // if (total_points > 0) {
-    //     result_.reproj_err_left = total_reproj_left / total_points;
-    //     result_.reproj_err_right = total_reproj_right / total_points;
-    //     std::cout << "\n=== 双目重投影误差摘要 ===" << std::endl;
-    //     std::cout << "左相机: " << std::fixed << std::setprecision(3) << result_.reproj_err_left << " px" << std::endl;
-    //     std::cout << "右相机: " << std::fixed << std::setprecision(3) << result_.reproj_err_right << " px" << std::endl;
-    // }
+
+    std::cout << "\n=== 重投影误差摘要 (OpenCV RMS) ===" << std::endl;
+    std::cout << "左相机 RMS: " << std::fixed << std::setprecision(4) << result_.rms_left << " px" << std::endl;
+    std::cout << "右相机 RMS: " << std::fixed << std::setprecision(4) << result_.rms_right << " px" << std::endl;
+    std::cout << "双目系统 RMS: " << std::fixed << std::setprecision(4) << result_.rms_stereo << " px" << std::endl;
 }
 
 /**

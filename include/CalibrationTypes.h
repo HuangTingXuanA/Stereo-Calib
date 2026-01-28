@@ -34,13 +34,10 @@ struct CalibrationResult {
     double rms_left;                 // 左相机RMS误差
     double rms_right;                // 右相机RMS误差
     double rms_stereo;               // 双目RMS误差
-    double reproj_err_left;          // 左相机平均重投影误差
-    double reproj_err_right;         // 右相机平均重投影误差
     
     // 构造函数：初始化误差值为0
     CalibrationResult() 
-        : rms_left(0.0), rms_right(0.0), rms_stereo(0.0),
-          reproj_err_left(0.0), reproj_err_right(0.0) {}
+        : rms_left(0.0), rms_right(0.0), rms_stereo(0.0) {}
 };
 
 /**

@@ -1,7 +1,7 @@
-// 1. Store original image
-// 2. Add refineEllipses method declaration
-// 3. Call refineEllipses in detect()
-// 4. Implement refineEllipses logic
+// 1. 存储原始图像
+// 2. 添加 refineEllipses 方法声明
+// 3. 在 detect() 中调用 refineEllipses
+// 4. 实现 refineEllipses 逻辑
 
 #include "ellipse_detector.hpp"
 #include "dsf.hpp"
@@ -67,7 +67,7 @@ private:
     void initUnionFind();
     void arcMatchingByUnionFind();
     void ellipseCluster();
-    void refineEllipses(); // Secondary refinement
+    void refineEllipses(); // 二次细化
     
     // 工具函数
     int findRoot(int k);
@@ -82,7 +82,7 @@ private:
     DetectorParams params_;
     int width_, height_;
     cv::Mat smoothImage_;
-    cv::Mat originalImage_; // Stored original image for refinement
+    cv::Mat originalImage_; // 存储用于细化的原始图像
     
     // 圆弧数据
     std::vector<std::vector<cv::Point>> arcs_;
@@ -158,15 +158,15 @@ public:
         for (int v = r.start * range; v < vEnd; v++) {
             cv::RotatedRect& ell = ellipseList_[v];
             
-            // --- Center Intensity Constraint ---
+            // --- 中心亮度约束 ---
             if (centerIntensityThresh_ != 0) {
                  int cx = cvRound(ell.center.x);
                  int cy = cvRound(ell.center.y);
                  if (cx >= 0 && cx < width_ && cy >= 0 && cy < height_) {
                      uchar val = image_.at<uchar>(cy, cx);
-                     if (polarity_ == 1) { // Bright Ellipse -> Center should be Bright
+                     if (polarity_ == 1) { // 亮椭圆 -> 中心应该是亮的
                          if (val <= brightCenterThresh_) continue;
-                     } else if (polarity_ == -1) { // Dark Ellipse -> Center should be Dark
+                     } else if (polarity_ == -1) { // 暗椭圆 -> 中心应该是暗的
                          if (val >= darkCenterThresh_) continue;
                      }
                  }
@@ -221,18 +221,18 @@ public:
                 
                 cv::Vec2f rdir = ellGrad[j];
                 
-                // Dot product of image gradient and ellipse normal (outward)
+                // 图像梯度与椭圆法线（指向外）的点积
                 double dot = cdir.dot(rdir);
 
                 bool pass = false;
                 if (polarity_ == 0) {
-                    // Accept both parallel and anti-parallel
+                    // 接受平行和反向平行
                     if (std::abs(dot) > cosGradAngle_) pass = true;
                 } else if (polarity_ == 1) { 
-                    // Polarity 1: Bright Ellipse -> Gradient Inward -> Anti-parallel to Normal
+                    // 极性 1: 亮椭圆 -> 梯度指向内 -> 与法线反向
                     if (dot <= -cosGradAngle_) pass = true;
                 } else if (polarity_ == -1) { 
-                    // Polarity -1: Dark Ellipse -> Gradient Outward -> Parallel to Normal
+                    // 极性 -1: 暗椭圆 -> 梯度指向外 -> 与法线同向
                     if (dot >= cosGradAngle_) pass = true;
                 }
 
@@ -306,7 +306,7 @@ std::vector<Ellipse> EllipseDetectorImpl::detect() {
     // 6. 椭圆聚类与验证
     ellipseCluster();
     
-    // 7. 二次拟合 (Refinement)
+    // 7. 二次拟合 (椭圆细化)
     if (params_.refine.useRefine) {
         refineEllipses();
     }
@@ -553,22 +553,22 @@ void EllipseDetectorImpl::ellipseCluster() {
 
 namespace {
 
-// 3x3 Sobel for magnitude and direction
+// 使用 3x3 Sobel 计算梯度幅值和方向
 void computeGradientROI(const cv::Mat& img, cv::Mat& mag, cv::Mat& dx, cv::Mat& dy) {
     cv::Sobel(img, dx, CV_32F, 1, 0, 3);
     cv::Sobel(img, dy, CV_32F, 0, 1, 3);
     cv::magnitude(dx, dy, mag);
 }
 
-// Parabolic interpolation for sub-pixel peak
-// Returns offset [-0.5, 0.5] from center
+// 抛物线插值寻找亚像素峰值
+// 返回相对于中心的偏移量 [-0.5, 0.5]
 float parabolicInterpolation(float y_minus, float y_0, float y_plus) {
     float denom = 2.0f * (y_minus - 2.0f * y_0 + y_plus);
     if (std::abs(denom) < 1e-5f) return 0.0f;
     return (y_minus - y_plus) / denom;
 }
 
-// Get interpolated value at float coordinates
+// 获取浮点坐标处的插值结果
 float getInterpValue(const cv::Mat& img, float x, float y) {
     if (x < 0 || x >= img.cols - 1 || y < 0 || y >= img.rows - 1) return 0.0f;
     int x0 = static_cast<int>(x);
@@ -584,10 +584,10 @@ float getInterpValue(const cv::Mat& img, float x, float y) {
     return (1-ax)*(1-ay)*v00 + ax*(1-ay)*v10 + (1-ax)*ay*v01 + ax*ay*v11;
 }
 
-// Robust geometric distance approximation (Sampson distance)
+// 鲁棒几何距离近似 (Sampson 距离)
 // f = (x/a)^2 + (y/b)^2 - 1
 // Grad(f) = [2x/a^2, 2y/b^2]
-// Dist approx = |f| / |Grad(f)|
+// 距离近似 = |f| / |Grad(f)|
 double computeSampsonDist(const cv::Point2f& p, const cv::RotatedRect& ell, double* outRes = nullptr) {
     double angleRad = ell.angle * CV_PI / 180.0;
     double cx = ell.center.x;
@@ -600,7 +600,7 @@ double computeSampsonDist(const cv::Point2f& p, const cv::RotatedRect& ell, doub
     
     double tx = p.x - cx;
     double ty = p.y - cy;
-    // Rotate to canonical
+    // 旋转到标准坐标系
     double rx = tx * cosA + ty * sinA;
     double ry = -tx * sinA + ty * cosA;
     
@@ -609,13 +609,13 @@ double computeSampsonDist(const cv::Point2f& p, const cv::RotatedRect& ell, doub
     
     double f = (rx * rx) / a2 + (ry * ry) / b2 - 1.0;
     
-    double df_dx = 2 * rx / a2; // in canonical
+    double df_dx = 2 * rx / a2; // 标准坐标系下
     double df_dy = 2 * ry / b2;
     
-    // Norm of gradient in original space is same as in rotated space (rotation is isometric)
+    // 原始空间的梯度模长与旋转空间相同（旋转是等距变换）
     double gradNorm = std::sqrt(df_dx * df_dx + df_dy * df_dy);
     
-    // Avoid div by zero
+    // 避免除以零
     if (gradNorm < 1e-6) gradNorm = 1e-6;
     
     if (outRes) *outRes = f / gradNorm;
@@ -623,10 +623,10 @@ double computeSampsonDist(const cv::Point2f& p, const cv::RotatedRect& ell, doub
     return std::abs(f) / gradNorm;
 }
 
-// Helper to compute Jacobian numerically for 5 params: cx, cy, a, b, angle
-// Params vector: [cx, cy, a, b, angle]
+// 计算 5 个参数的数值雅可比矩阵: cx, cy, a, b, angle
+// 参数矢量: [cx, cy, a, b, angle]
 void computeJacobianNumerical(const cv::Point2f& p, double* params, double* J) {
-    double eps[5] = {0.5, 0.5, 0.5, 0.5, 0.5}; // Step sizes
+    double eps[5] = {0.5, 0.5, 0.5, 0.5, 0.5}; // 步长
     
     cv::RotatedRect baseEll(cv::Point2f(params[0], params[1]), cv::Size2f(params[2]*2, params[3]*2), params[4]);
     double y0;
@@ -645,18 +645,18 @@ void computeJacobianNumerical(const cv::Point2f& p, double* params, double* J) {
         double yMinus;
         computeSampsonDist(p, pertEll2, &yMinus);
         
-        params[i] = oldVal; // Restore
+        params[i] = oldVal; // 恢复
         
         J[i] = (yPlus - yMinus) / (2.0 * eps[i]);
     }
 }
 
-} // namespace
+} // 命名空间
 
 void EllipseDetectorImpl::refineEllipses() {
     if (clusteredEllipse_.empty()) return;
 
-    const int maxIter = 10; // Max LM iterations
+    const int maxIter = 10; // 最大 LM 迭代次数
     const double roiRatio = params_.refine.roiRatio;
     const double tukeyAlpha = params_.refine.tukeyAlpha;
     const int minGrad = params_.refine.minGradient;
@@ -665,7 +665,7 @@ void EllipseDetectorImpl::refineEllipses() {
     for (size_t i = 0; i < clusteredEllipse_.size(); i++) {
         cv::RotatedRect& ell = clusteredEllipse_[i];
 
-        // 1. Extract ROI (Backtracking)
+        // 1. 提取感兴趣区域 (ROI)
         double maxDim = std::max(ell.size.width, ell.size.height);
         int roiSize = static_cast<int>(maxDim * roiRatio);
         
@@ -674,7 +674,7 @@ void EllipseDetectorImpl::refineEllipses() {
         int maxX = minX + roiSize;
         int maxY = minY + roiSize;
 
-        // Clip
+        // 边界裁剪
         int r_minX = std::max(0, minX);
         int r_minY = std::max(0, minY);
         int r_maxX = std::min(width_, maxX);
@@ -686,7 +686,7 @@ void EllipseDetectorImpl::refineEllipses() {
         cv::Mat roiImg = originalImage_(roiRect);
         if (roiImg.empty()) continue;
 
-        // 2. Gradients & Subpixel Extraction
+        // 2. 梯度与亚像素提取
         cv::Mat mag, dx, dy;
         computeGradientROI(roiImg, mag, dx, dy);
 
@@ -697,28 +697,28 @@ void EllipseDetectorImpl::refineEllipses() {
                 float val = mag.at<float>(y, x);
                 if (val < minGrad) continue;
                 
-                // Non-maximum suppression along gradient could be added, but user asked for "Along gradient take 3 points"
-                // Let's implement the specific logic:
-                // Normalized gradient direction
+                // 沿梯度方向可以添加非极大值抑制，此处按照用户要求：“沿梯度提取 3 个点”
+                // 实现特定逻辑：
+                // 归一化梯度方向
                 float gX = dx.at<float>(y, x);
                 float gY = dy.at<float>(y, x);
                 float len = std::sqrt(gX*gX + gY*gY);
                 if (len < 1e-4) continue;
                 gX /= len; gY /= len;
                 
-                // Sample 3 points: Current (0), +Dir (+1), -Dir (-1)
+                // 采样 3 个点：当前点 (0), 正方向 (+1), 负方向 (-1)
                 float v0 = val;
                 float vPlus = getInterpValue(mag, x + gX, y + gY);
                 float vMinus = getInterpValue(mag, x - gX, y - gY);
                 
-                // Check if it's a local maximum along gradient
+                // 检查是否为梯度方向的局部极大值
                 if (v0 >= vPlus && v0 >= vMinus) {
                     float delta = parabolicInterpolation(vMinus, v0, vPlus);
-                    // Subpixel coordinate
+                    // 亚像素坐标单位
                     float spX = x + delta * gX;
                     float spY = y + delta * gY;
                     
-                    // Convert to global
+                    // 转换到全局坐标
                     points.emplace_back(cv::Point2f(spX + r_minX, spY + r_minY));
                 }
             }
@@ -726,16 +726,16 @@ void EllipseDetectorImpl::refineEllipses() {
 
         if (points.size() < 10) continue;
 
-        // 3. LM Optimization
+        // 3. LM 优化
         double p[5] = {ell.center.x, ell.center.y, ell.size.width/2.0, ell.size.height/2.0, ell.angle};
         double lambda = lambdaInit;
         
-        // Weights for points
+        // 采样点权重
         std::vector<double> W(points.size(), 1.0);
         
         for (int iter = 0; iter < maxIter; iter++) {
-            // Build Linear System: (J^T W J + lambda I) dp = - J^T W r   (Here r is signed residual)
-            // Or usually: min sum ( w * r^2 ). update = -(J'WJ + lam I)^-1 J'W r
+            // 构建线性系统: (J^T W J + lambda I) dp = - J^T W r   (此处 r 是有符号残差)
+            // 或者通常形式: min sum ( w * r^2 ). 增量更新 = -(J'WJ + lam I)^-1 J'W r
             
             cv::Mat J(static_cast<int>(points.size()), 5, CV_64F);
             cv::Mat r(static_cast<int>(points.size()), 1, CV_64F);
@@ -744,36 +744,36 @@ void EllipseDetectorImpl::refineEllipses() {
             double currentError = 0;
             std::vector<double> residuals(points.size());
             
-            // Compute Residuals & Jacobian
+            // 计算残差和雅可比
             for (size_t k = 0; k < points.size(); k++) {
                 double res;
                 computeSampsonDist(points[k], 
                     cv::RotatedRect(cv::Point2f(p[0],p[1]), cv::Size2f(p[2]*2, p[3]*2), p[4]), 
                     &res);
                 
-                residuals[k] = res; // Signed geometric distance approx
+                residuals[k] = res; // 有符号几何距离近似
                 r.at<double>(static_cast<int>(k), 0) = res;
                 
-                // Jacobian row
+                // 雅可比矩阵行
                 double Jrow[5];
                 computeJacobianNumerical(points[k], p, Jrow);
                 for (int j = 0; j < 5; j++) J.at<double>(static_cast<int>(k), j) = Jrow[j];
                 
-                // 4. Update Weights (Tukey Bisquare)
-                // Need scale estimate 'c'
-                // Re-estimate c every iter or once? Usually once per robust step or adaptive.
-                // User said: "Use Bisquare weights".
-                // We calculate c using Median Absolute Deviation of residuals
+                // 4. 更新权重 (Tukey Bisquare)
+                // 需要估计尺度因子 'c'
+                // 每轮迭代重新估计 c 还是只估计一次？通常每一步鲁棒或自适应地进行。
+                // 用户要求: "使用 Bisquare 权重"。
+                // 我们使用残差的中绝对偏差 (MAD) 来计算 c
             }
             
-            // Calc c (MAD) 
-            // Better: c = 1.4826 * MAD * tune_factor. 
-            // If tukeyAlpha is the 'tune_factor' (e.g. 4.685 for 95% efficiency), then c = tukeyAlpha * sigma_mad.
-            // Let's assume params_.tukeyAlpha IS the 'c' in pixels directly if small, OR factor.
-            // Typically c ~ 4-5 pixels for robust fitting is generous. 
-            // Let's calculate sigma first.
+            // 计算 c (MAD) 
+            // 改进: c = 1.4826 * MAD * tune_factor. 
+            // 如果 tukeyAlpha 是 'tune_factor' (例如 95% 效率取 4.685), 那么 c = tukeyAlpha * sigma_mad.
+            // 假设 params_.tukeyAlpha 如果较小则直接作为像素级的 'c'，否则作为系数。
+            // 通常鲁棒拟合 c ~ 4-5 像素比较理想。 
+            // 首先计算 sigma。
            
-            // Copy residuals absolute values
+            // 复制残差绝对值
             std::vector<double> absRes;
             absRes.reserve(points.size());
             for(double v : residuals) absRes.push_back(std::abs(v));
@@ -781,10 +781,10 @@ void EllipseDetectorImpl::refineEllipses() {
             std::nth_element(absRes.begin(), absRes.begin() + n/2, absRes.end());
             double mad = absRes[n/2];
             double sigma = 1.4826 * mad;
-            double c_val = (sigma < 0.1) ? tukeyAlpha : (tukeyAlpha * sigma); // Use user alpha as factor
-            if (c_val < 1.0) c_val = 1.0; // Min clamping
+            double c_val = (sigma < 0.1) ? tukeyAlpha : (tukeyAlpha * sigma); // 使用用户定义的系数
+            if (c_val < 1.0) c_val = 1.0; // 最小阈值限制
             
-            // Apply Tukey
+            // 应用 Tukey 权重
             for (size_t k = 0; k < points.size(); k++) {
                 double u = std::abs(residuals[k]) / c_val;
                 double w = 0;
@@ -796,13 +796,13 @@ void EllipseDetectorImpl::refineEllipses() {
                 currentError += w * residuals[k] * residuals[k];
             }
             
-            // Solve System
+            // 解系统
             cv::Mat Jt = J.t();
             cv::Mat JtW = Jt * Wmat;
             cv::Mat JtWJ = JtW * J;
             cv::Mat JtWr = JtW * r;
             
-            // Levenberg-Marquardt Damping
+            // Levenberg-Marquardt 阻尼
             for (int j = 0; j < 5; j++) {
                 JtWJ.at<double>(j, j) *= (1.0 + lambda);
             }
@@ -812,29 +812,29 @@ void EllipseDetectorImpl::refineEllipses() {
             
             if (!solved) break;
             
-            // Update candidate
+            // 更新候选解
             double p_new[5];
             for (int j = 0; j < 5; j++) p_new[j] = p[j] + delta.at<double>(j, 0);
             
-            // Check if error reduced (simplified LM step check)
-            // Just accept step for this simple impl, or check bounds
-            // Constraints: a>0, b>0, and not too large
+            // 检查误差是否减小（简化 LM 步骤检查）
+            // 在此简单实现中直接接受步长，或检查边界
+            // 约束: a>0, b>0, 且不能太大
             double maxImgDim = std::max(width_, height_) * 1.5;
             if (p_new[2] < 1.0 || p_new[3] < 1.0 || p_new[2] > maxImgDim || p_new[3] > maxImgDim) {
                 lambda *= 10;
                 continue;
             }
             
-            // Accept
+            // 接受更新
             for (int j = 0; j < 5; j++) p[j] = p_new[j];
             lambda /= 10;
             if (lambda < 1e-6) lambda = 1e-6;
              
-             // Convergence check
+             // 收敛检查
              if (cv::norm(delta) < 1e-4) break;
         }
 
-        // Update result
+        // 更新结果
         clusteredEllipse_[i] = cv::RotatedRect(cv::Point2f(p[0],p[1]), cv::Size2f(p[2]*2, p[3]*2), p[4]);
     }
 }
@@ -993,7 +993,7 @@ cv::RotatedRect EllipseDetectorImpl::fit(const std::vector<int>& ids) {
     double minDim = std::min(ell.size.width, ell.size.height);
     double maxDim = std::max(ell.size.width, ell.size.height);
     if (maxDim > 0 && (minDim / maxDim) < params_.fit.minAspectRatio) {
-        return cv::RotatedRect(); // Return invalid rect if too flat
+        return cv::RotatedRect(); // 如果太扁平则返回无效矩形
     }
     
     return ell;
@@ -1048,7 +1048,7 @@ cv::Vec3f EllipseDetectorImpl::interiorRate(const std::vector<int>& ids, const c
                      static_cast<float>(ct / L));
 }
 
-} // anonymous namespace
+} // 匿名命名空间
 
 // ============================================================================
 // 公开接口
