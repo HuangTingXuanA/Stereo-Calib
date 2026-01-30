@@ -80,14 +80,14 @@ cv::Mat YoloSegmentor::preprocess(const cv::Mat& image, cv::Size& original_size,
     int dw = input_w - scaled_w;
     int dh = input_h - scaled_h;
     
-    pad_w = dw / 2;
-    pad_h = dh / 2;
+    // 与 Python letterbox 一致：先除以 2 得到浮点数，再加减 0.1 取整
+    float dw_half = dw / 2.0f;
+    float dh_half = dh / 2.0f;
     
-    // 添加补边 (顶，底，左，右)
-    int top = static_cast<int>(std::round(dh - 0.1) / 2);
-    int bottom = static_cast<int>(std::round(dh + 0.1) / 2);
-    int left = static_cast<int>(std::round(dw - 0.1) / 2);
-    int right = static_cast<int>(std::round(dw + 0.1) / 2);
+    int left = static_cast<int>(std::round(dw_half - 0.1f));
+    int right = static_cast<int>(std::round(dw_half + 0.1f));
+    int top = static_cast<int>(std::round(dh_half - 0.1f));
+    int bottom = static_cast<int>(std::round(dh_half + 0.1f));
     
     pad_w = left;
     pad_h = top;
@@ -272,6 +272,19 @@ SegmentResult YoloSegmentor::segment(const cv::Mat& image) {
     float scale;
     int pad_w, pad_h, input_w, input_h;
     cv::Mat preprocessed = preprocess(image, original_size, scale, pad_w, pad_h, input_w, input_h);
+    
+    // 使用预处理后图像的实际尺寸（防止计算误差导致越界）
+    int actual_h = preprocessed.rows;
+    int actual_w = preprocessed.cols;
+    
+    // 验证尺寸匹配
+    if (actual_h != input_h || actual_w != input_w) {
+        std::cerr << "[YoloSegmentor] 尺寸不匹配: 预期 " << input_w << "x" << input_h 
+                  << ", 实际 " << actual_w << "x" << actual_h << std::endl;
+        // 使用实际尺寸
+        input_h = actual_h;
+        input_w = actual_w;
+    }
     
     // 准备输入tensor
     std::vector<int64_t> input_dims = {1, 3, input_h, input_w};

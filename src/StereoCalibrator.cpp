@@ -230,45 +230,47 @@ bool StereoCalibrator::detectCircles() {
         if (right_ellipses.empty() && !right_has_mask) {
             right_ellipses = detectEllipsesInImage(right_img);
         }
-        
-        // ========== 检查椭圆数量 ==========
-        bool left_valid = (left_ellipses.size() == static_cast<size_t>(expected_circles));
-        bool right_valid = (right_ellipses.size() == static_cast<size_t>(expected_circles));
-        
-        
-        if (!left_valid || !right_valid) {
-            std::cout << "图像对 " << left_filename << ": "
-                      << "L-" << left_ellipses.size() << "个椭圆 / "
-                      << "R-" << right_ellipses.size() << "个椭圆 "
-                      << "[期望" << expected_circles << "个，跳过]" << std::endl;
-            
-            // 保存调试图像
-            if (!left_valid) {
-                saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
-                                       "debug_img/L_" + left_filename + "_debug.png", left_conf);
-            }
-            if (!right_valid) {
-                saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
-                                       "debug_img/R_" + right_filename + "_debug.png", right_conf);
-            }
-            continue;
-        }
 
+        // ========== 收集处理状态信息 ==========
+        std::vector<std::string> errors;  // 错误信息列表
+        
         // 先查找锚点，用于调试可视化和圆心排序
         std::vector<Ellipse> left_anchors, right_anchors;
-        bool left_anchor_ok = findAnchors(left_ellipses, left_anchors);
-        bool right_anchor_ok = findAnchors(right_ellipses, right_anchors);
-
-        // 保存调试图
-        // saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
-        //                        "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
-        // saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
-        //                        "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
-        // if (!left_valid || !right_valid) continue;
+        std::string left_anchor_err, right_anchor_err;
+        bool left_anchor_ok = findAnchors(left_ellipses, left_anchors, "L", &left_anchor_err);
+        bool right_anchor_ok = findAnchors(right_ellipses, right_anchors, "R", &right_anchor_err);
         
-        // 检查锚点是否成功识别
-        if (!left_anchor_ok || !right_anchor_ok) {
-            std::cout << "图像对 " << left_filename << ": 锚点识别失败，跳过" << std::endl;
+        if (!left_anchor_err.empty()) errors.push_back("  L: " + left_anchor_err);
+        if (!right_anchor_err.empty()) errors.push_back("  R: " + right_anchor_err);
+
+        // ========== 检查锚点识别和椭圆数量 ==========
+        bool left_enough = (left_ellipses.size() >= static_cast<size_t>(expected_circles));
+        bool right_enough = (right_ellipses.size() >= static_cast<size_t>(expected_circles));
+        
+        if (!left_enough) {
+            errors.push_back("  L: 椭圆不足 (" + std::to_string(left_ellipses.size()) + "/" + std::to_string(expected_circles) + ")");
+        }
+        if (!right_enough) {
+            errors.push_back("  R: 椭圆不足 (" + std::to_string(right_ellipses.size()) + "/" + std::to_string(expected_circles) + ")");
+        }
+        
+        if (!left_anchor_ok || !right_anchor_ok || !left_enough || !right_enough) {
+            // 输出图像对状态
+            std::cout << "[" << left_filename << "] L:" << left_ellipses.size() 
+                      << " R:" << right_ellipses.size() << " -> 失败" << std::endl;
+            for (const auto& err : errors) {
+                std::cout << err << std::endl;
+            }
+            
+            // 保存调试图像
+            if (!left_enough || !left_anchor_ok) {
+                saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
+                                       "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
+            }
+            if (!right_enough || !right_anchor_ok) {
+                saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
+                                       "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
+            }
             continue;
         }
 
@@ -286,11 +288,33 @@ bool StereoCalibrator::detectCircles() {
                                       std::vector<cv::Point2f>& ordered_centers) -> bool {
             // 构建锚点的模型坐标和检测坐标
             std::vector<cv::Point2f> model_pts(5), detected_pts(5);
-            for (const auto& [id, grid_pos] : board_config_.anchors) {
-                if (id >= 0 && id < 5) {
-                    model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
+            
+            // 根据坐标模式获取锚点的模型坐标
+            if (board_config_.auto_generate_coords) {
+                // 自动生成模式：从 anchors (row, col) 映射计算模型坐标
+                for (const auto& [id, grid_pos] : board_config_.anchors) {
+                    if (id >= 0 && id < 5) {
+                        model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
+                    }
+                }
+            } else {
+                // 外部文件模式：从 anchor_labels 查找对应的3D坐标
+                std::map<std::string, cv::Point3f> label_to_coord;
+                for (const auto& pt : board_config_.world_coords) {
+                    label_to_coord[pt.label] = pt.coord;
+                }
+                
+                for (size_t id = 0; id < 5; ++id) {
+                    const std::string& label = board_config_.anchor_labels[id];
+                    auto it = label_to_coord.find(label);
+                    if (it == label_to_coord.end()) {
+                        return false;
+                    }
+                    // 使用 X, Y 作为2D模型坐标
+                    model_pts[id] = cv::Point2f(it->second.x, it->second.y);
                 }
             }
+            
             for (int k = 0; k < 5; ++k) {
                 detected_pts[k] = cv::Point2f(anchors[k].center.x, anchors[k].center.y);
             }
@@ -311,10 +335,41 @@ bool StereoCalibrator::detectCircles() {
             std::vector<cv::Point2f> back_projected;
             cv::perspectiveTransform(all_detected, back_projected, H_inv);
             
-            // 为每个点分配网格坐标并验证
+            // 准备模型空间中的目标网格点
+            std::vector<cv::Point2f> model_grid_pts;
+            double min_dist_between_pts = 1e9;
+            
+            if (board_config_.auto_generate_coords) {
+                // 自动生成模式：生成规则网格
+                for (int r = 0; r < board_config_.rows; ++r) {
+                    for (int c = 0; c < board_config_.cols; ++c) {
+                        model_grid_pts.emplace_back(c * spacing, r * spacing);
+                    }
+                }
+                min_dist_between_pts = spacing;
+            } else {
+                // 外部文件模式：使用预加载的坐标
+                for (const auto& pt : board_config_.world_coords) {
+                    model_grid_pts.emplace_back(pt.coord.x, pt.coord.y);
+                }
+                // 计算点间最小距离
+                for (size_t i = 0; i < model_grid_pts.size(); ++i) {
+                    for (size_t j = i + 1; j < model_grid_pts.size(); ++j) {
+                        double d = cv::norm(model_grid_pts[i] - model_grid_pts[j]);
+                        if (d > 1e-6 && d < min_dist_between_pts) {
+                            min_dist_between_pts = d;
+                        }
+                    }
+                }
+            }
+            
+            // 网格匹配容差
+            const double GRID_TOLERANCE = min_dist_between_pts / 3.0;
+            
+            // 为每个投影点找最近的网格点
             struct GridPoint {
                 cv::Point2f image_pt;
-                int row, col;
+                int grid_idx;  // 网格点索引
                 double dist_to_grid;
             };
             std::vector<GridPoint> grid_points;
@@ -323,69 +378,54 @@ bool StereoCalibrator::detectCircles() {
                 const auto& bp = back_projected[k];
                 
                 // 找最近的网格点
-                int col = static_cast<int>(std::round(bp.x / spacing));
-                int row = static_cast<int>(std::round(bp.y / spacing));
-                
-                // 检查是否在有效范围内
-                if (col < 0 || col >= board_config_.cols ||
-                    row < 0 || row >= board_config_.rows) {
-                    continue;
+                double min_dist = 1e9;
+                int best_idx = -1;
+                for (size_t g = 0; g < model_grid_pts.size(); ++g) {
+                    double d = cv::norm(bp - model_grid_pts[g]);
+                    if (d < min_dist) {
+                        min_dist = d;
+                        best_idx = static_cast<int>(g);
+                    }
                 }
                 
-                // 计算到网格点的距离
-                float nearest_x = col * spacing;
-                float nearest_y = row * spacing;
-                double dist = std::sqrt((bp.x - nearest_x) * (bp.x - nearest_x) +
-                                        (bp.y - nearest_y) * (bp.y - nearest_y));
-                
                 // 只接受距离足够近的点
-                if (dist < spacing / 3.0) {
-                    grid_points.push_back({all_detected[k], row, col, dist});
+                if (min_dist < GRID_TOLERANCE && best_idx >= 0) {
+                    grid_points.push_back({all_detected[k], best_idx, min_dist});
                 }
             }
             
             // 检查是否有足够的点
-            int expected = board_config_.rows * board_config_.cols;
+            int expected = static_cast<int>(model_grid_pts.size());
             if (static_cast<int>(grid_points.size()) < expected * 0.9) {
-                std::cout << "  [警告] 网格匹配点不足: " << grid_points.size() << "/" << expected << std::endl;
+                // 不在这里输出，由调用处统一处理
                 return false;
             }
             
-            // 按网格坐标排序（与世界坐标生成顺序一致：row优先，然后col）
-            std::sort(grid_points.begin(), grid_points.end(), 
-                     [](const GridPoint& a, const GridPoint& b) {
-                         if (a.row != b.row) return a.row < b.row;
-                         return a.col < b.col;
-                     });
-            
             // 去重：同一个网格位置只保留距离最近的点
-            std::map<std::pair<int,int>, GridPoint> unique_grid;
+            std::map<int, GridPoint> unique_grid;
             for (const auto& gp : grid_points) {
-                auto key = std::make_pair(gp.row, gp.col);
-                if (unique_grid.find(key) == unique_grid.end() || 
-                    gp.dist_to_grid < unique_grid[key].dist_to_grid) {
-                    unique_grid[key] = gp;
+                if (unique_grid.find(gp.grid_idx) == unique_grid.end() || 
+                    gp.dist_to_grid < unique_grid[gp.grid_idx].dist_to_grid) {
+                    unique_grid[gp.grid_idx] = gp;
                 }
             }
             
             // 检查是否覆盖了所有网格点
             if (static_cast<int>(unique_grid.size()) != expected) {
-                std::cout << "  [警告] 网格点不完整: " << unique_grid.size() << "/" << expected << std::endl;
+                // 不在这里输出，由调用处统一处理
                 return false;
             }
             
-            // 按顺序输出
+            // 按网格索引顺序输出（与世界坐标生成顺序一致）
             ordered_centers.clear();
             ordered_centers.reserve(expected);
-            for (int r = 0; r < board_config_.rows; ++r) {
-                for (int c = 0; c < board_config_.cols; ++c) {
-                    auto it = unique_grid.find(std::make_pair(r, c));
-                    if (it == unique_grid.end()) {
-                        std::cout << "  [错误] 缺少网格点 (" << r << ", " << c << ")" << std::endl;
-                        return false;
-                    }
-                    ordered_centers.push_back(it->second.image_pt);
+            for (int idx = 0; idx < expected; ++idx) {
+                auto it = unique_grid.find(idx);
+                if (it == unique_grid.end()) {
+                    // 不在这里输出，由调用处统一处理
+                    return false;
                 }
+                ordered_centers.push_back(it->second.image_pt);
             }
             
             return true;
@@ -393,13 +433,24 @@ bool StereoCalibrator::detectCircles() {
         
         std::vector<cv::Point2f> left_centers, right_centers;
         
-        if (!orderByHomography(left_ellipses, left_anchors, left_centers)) {
-            std::cout << "图像对 " << left_filename << ": 左图排序失败，跳过" << std::endl;
-            continue;
-        }
+        bool left_order_ok = orderByHomography(left_ellipses, left_anchors, left_centers);
+        bool right_order_ok = orderByHomography(right_ellipses, right_anchors, right_centers);
         
-        if (!orderByHomography(right_ellipses, right_anchors, right_centers)) {
-            std::cout << "图像对 " << left_filename << ": 右图排序失败，跳过" << std::endl;
+        if (!left_order_ok || !right_order_ok) {
+            std::cout << "[" << left_filename << "] L:" << left_ellipses.size() 
+                      << " R:" << right_ellipses.size() << " -> 排序失败" << std::endl;
+            if (!left_order_ok) std::cout << "  L: 网格匹配失败" << std::endl;
+            if (!right_order_ok) std::cout << "  R: 网格匹配失败" << std::endl;
+            
+            // 保存调试图像
+            if (!left_order_ok) {
+                saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
+                                       "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
+            }
+            if (!right_order_ok) {
+                saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
+                                       "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
+            }
             continue;
         }
         
@@ -408,10 +459,8 @@ bool StereoCalibrator::detectCircles() {
         image_pairs_[i].right_centers = right_centers;
         image_pairs_[i].world_points = world_coords;
         
-        std::cout << "图像对 " << left_filename << ": "
-                  << "L-" << left_centers.size() << "个点 / "
-                  << "R-" << right_centers.size() << "个点 "
-                  << "[已加入标定]" << std::endl;
+        std::cout << "[" << left_filename << "] L:" << left_centers.size() 
+                  << " R:" << right_centers.size() << " -> 成功" << std::endl;
         
         valid_count++;
     }
@@ -468,8 +517,8 @@ void StereoCalibrator::saveDebugImageWithMask(
         cv::Point center(cvRound(e.center.x), cvRound(e.center.y));
         
         // 绘制ID
-        cv::putText(vis, std::to_string(i), center + cv::Point(10, -10), 
-                    cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+        cv::putText(vis, std::to_string(i), center + cv::Point(15, 15), 
+                    cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
     }
     
     // 显示统计信息
@@ -482,7 +531,9 @@ void StereoCalibrator::saveDebugImageWithMask(
     cv::imwrite(output_path, vis);
 }
 
-bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::vector<Ellipse>& out_anchors) {
+bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::vector<Ellipse>& out_anchors, 
+                                   const std::string& image_name, std::string* error_msg) {
+    (void)image_name;  // 参数仅用于日志，现改为通过 error_msg 返回
     /**
      * RANSAC风格锚点匹配算法 (透视变换鲁棒版)
      * 
@@ -513,14 +564,38 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     std::vector<Ellipse> candidates(sorted.begin(), sorted.begin() + n_cand);
     
     // 2. 准备锚点的模型坐标
-    if (board_config_.anchors.size() != 5) return false;
-    
-    const float spacing = board_config_.circle_spacing;
     std::vector<cv::Point2f> anchor_model_pts(5);
-    for (const auto& [id, grid_pos] : board_config_.anchors) {
-        if (id >= 0 && id < 5) {
-            // 注意: board.yaml中 [row, col] -> 模型坐标 (col*spacing, row*spacing)
-            anchor_model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
+    
+    if (board_config_.auto_generate_coords) {
+        // 自动生成模式：从 anchors (row, col) 映射计算模型坐标
+        if (board_config_.anchors.size() != 5) return false;
+        
+        const float spacing = board_config_.circle_spacing;
+        for (const auto& [id, grid_pos] : board_config_.anchors) {
+            if (id >= 0 && id < 5) {
+                // 注意: board.yaml中 [row, col] -> 模型坐标 (col*spacing, row*spacing)
+                anchor_model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
+            }
+        }
+    } else {
+        // 外部文件模式：从 anchor_labels 查找对应的3D坐标
+        if (board_config_.anchor_labels.size() != 5) return false;
+        
+        // 构建标签到坐标的映射
+        std::map<std::string, cv::Point3f> label_to_coord;
+        for (const auto& pt : board_config_.world_coords) {
+            label_to_coord[pt.label] = pt.coord;
+        }
+        
+        for (size_t id = 0; id < 5; ++id) {
+            const std::string& label = board_config_.anchor_labels[id];
+            auto it = label_to_coord.find(label);
+            if (it == label_to_coord.end()) {
+                std::cerr << "[findAnchors] 找不到锚点标签: " << label << std::endl;
+                return false;
+            }
+            // 使用 X, Y 作为2D模型坐标（Z通常接近0）
+            anchor_model_pts[id] = cv::Point2f(it->second.x, it->second.y);
         }
     }
     
@@ -538,8 +613,37 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     double best_fit_error = 1e9;
     std::vector<Ellipse> best_anchors;
     
-    // 内点阈值：投影到模型空间后，与最近网格点的距离 < spacing/4
-    const double GRID_TOLERANCE = spacing / 4.0;
+    // 准备模型空间中的所有目标点
+    std::vector<cv::Point2f> model_grid_pts;
+    double min_dist_between_pts = 1e9;  // 用于计算容差
+    
+    if (board_config_.auto_generate_coords) {
+        // 自动生成模式：生成规则网格
+        const float spacing = board_config_.circle_spacing;
+        for (int r = 0; r < board_config_.rows; ++r) {
+            for (int c = 0; c < board_config_.cols; ++c) {
+                model_grid_pts.emplace_back(c * spacing, r * spacing);
+            }
+        }
+        min_dist_between_pts = spacing;
+    } else {
+        // 外部文件模式：使用预加载的坐标
+        for (const auto& pt : board_config_.world_coords) {
+            model_grid_pts.emplace_back(pt.coord.x, pt.coord.y);
+        }
+        // 计算点间最小距离
+        for (size_t i = 0; i < model_grid_pts.size(); ++i) {
+            for (size_t j = i + 1; j < model_grid_pts.size(); ++j) {
+                double d = cv::norm(model_grid_pts[i] - model_grid_pts[j]);
+                if (d > 1e-6 && d < min_dist_between_pts) {
+                    min_dist_between_pts = d;
+                }
+            }
+        }
+    }
+    
+    // 内点阈值：与最近网格点的距离 < min_dist / 4
+    const double GRID_TOLERANCE = min_dist_between_pts / 4.0;
     
     // 生成组合的位掩码
     std::vector<int> combo(n_cand, 0);
@@ -582,27 +686,17 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
             std::vector<cv::Point2f> back_projected;
             cv::perspectiveTransform(all_detected, back_projected, H_inv);
             
-            // 计算内点数：检查投影点是否落在网格上
+            // 计算内点数：检查投影点是否落在预定义网格点附近
             int inliers = 0;
             for (const auto& bp : back_projected) {
                 // 找最近的网格点
-                float nearest_x = std::round(bp.x / spacing) * spacing;
-                float nearest_y = std::round(bp.y / spacing) * spacing;
-                
-                // 检查是否在有效网格范围内
-                int grid_col = static_cast<int>(std::round(bp.x / spacing));
-                int grid_row = static_cast<int>(std::round(bp.y / spacing));
-                
-                if (grid_col < 0 || grid_col >= board_config_.cols ||
-                    grid_row < 0 || grid_row >= board_config_.rows) {
-                    continue;  // 超出网格范围，不算内点
+                double min_dist = 1e9;
+                for (const auto& gp : model_grid_pts) {
+                    double d = cv::norm(bp - gp);
+                    if (d < min_dist) min_dist = d;
                 }
                 
-                // 计算到最近网格点的距离
-                double dist = std::sqrt((bp.x - nearest_x) * (bp.x - nearest_x) + 
-                                        (bp.y - nearest_y) * (bp.y - nearest_y));
-                
-                if (dist < GRID_TOLERANCE) {
+                if (min_dist < GRID_TOLERANCE) {
                     inliers++;
                 }
             }
@@ -631,7 +725,7 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     
     // 5. 输出结果
     if (best_inliers < 0) {
-        std::cout << "[findAnchors] 未找到有效组合" << std::endl;
+        if (error_msg) *error_msg = "未找到有效的锚点组合";
         return false;
     }
     
@@ -639,8 +733,10 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     // 这个阈值比较宽松，因为可能有误检和漏检
     int min_required = static_cast<int>(ellipses.size() * 0.5);
     if (best_inliers < min_required) {
-        std::cout << "[findAnchors] 内点过少: " << best_inliers << "/" << ellipses.size() 
-                  << " (需要至少 " << min_required << ")" << std::endl;
+        if (error_msg) {
+            *error_msg = "锚点内点过少: " + std::to_string(best_inliers) + "/" + 
+                         std::to_string(ellipses.size()) + " (需要至少" + std::to_string(min_required) + ")";
+        }
         return false;
     }
     
@@ -650,33 +746,61 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
 
 /**
  * @brief 执行双目标定
+ * 
+ * 采用两阶段标定策略：
+ *   阶段 1: 使用平面坐标 (Z=0) 获得初始内参
+ *   阶段 2: 使用真实 3D 坐标 (含 Z) + CALIB_USE_INTRINSIC_GUESS 进行精确标定
+ * 
+ * 原理: OpenCV 的 calibrateCamera 对于非平面点需要初始内参矩阵，
+ *       因为无法从非平面单张图像恢复唯一的内参解。
  */
 bool StereoCalibrator::calibrate() {
     // 1. 准备标定数据
-    std::vector<std::vector<cv::Point3f>> object_points;
+    std::vector<std::vector<cv::Point3f>> object_points_flat;  // 平面化坐标 (Z=0)
+    std::vector<std::vector<cv::Point3f>> object_points_real;  // 真实 3D 坐标
     std::vector<std::vector<cv::Point2f>> left_image_points;
     std::vector<std::vector<cv::Point2f>> right_image_points;
     
+    // 生成平面化和真实的世界坐标
+    std::vector<cv::Point3f> world_coords_flat = generateWorldCoordinates(true);   // Z=0
+    std::vector<cv::Point3f> world_coords_real = generateWorldCoordinates(false);  // 真实 Z
+    
     for (const auto& pair : image_pairs_) {
         if (pair.isValid()) {
-            object_points.push_back(pair.world_points);
+            object_points_flat.push_back(world_coords_flat);
+            object_points_real.push_back(world_coords_real);
             left_image_points.push_back(pair.left_centers);
             right_image_points.push_back(pair.right_centers);
         }
     }
     
-    if (object_points.size() < 3) {
+    if (object_points_flat.size() < 3) {
         std::cerr << "错误: 有效图像对不足3对" << std::endl;
         return false;
     }
     
+    // 检查是否需要两阶段标定（外部文件模式且包含非零 Z）
+    bool need_two_stage = !board_config_.auto_generate_coords;
+    if (need_two_stage) {
+        // 检查是否真的有非零 Z
+        double max_z = 0;
+        for (const auto& pt : world_coords_real) {
+            max_z = std::max(max_z, static_cast<double>(std::abs(pt.z)));
+        }
+        need_two_stage = (max_z > 0.01);  // Z 偏差 > 0.01mm 才启用两阶段
+    }
+    
     std::cout << "\n双目标定中..." << std::endl;
+    if (need_two_stage) {
+        std::cout << "  [使用两阶段标定: 先平面初始化，再精确标定]" << std::endl;
+    }
 
-    // 2. 左相机单目标定
-    // 使用有理畸变模型（8参数：k1,k2,p1,p2,k3,k4,k5,k6），固定k3以提高稳定性
+    // ========== 阶段 1: 使用平面坐标获得初始内参 ==========
     auto start_left = std::chrono::high_resolution_clock::now();
+    
+    // 左相机初始标定
     result_.rms_left = cv::calibrateCamera(
-        object_points, 
+        object_points_flat, 
         left_image_points, 
         image_size_,
         result_.camera_matrix_left, 
@@ -689,11 +813,10 @@ bool StereoCalibrator::calibrate() {
     auto end_left = std::chrono::high_resolution_clock::now();
     auto duration_left = std::chrono::duration_cast<std::chrono::milliseconds>(end_left - start_left);
     
-    // 3. 右相机单目标定
-    // 使用有理畸变模型（8参数：k1,k2,p1,p2,k3,k4,k5,k6），固定k3以提高稳定性
+    // 右相机初始标定
     auto start_right = std::chrono::high_resolution_clock::now();
     result_.rms_right = cv::calibrateCamera(
-        object_points, 
+        object_points_flat, 
         right_image_points, 
         image_size_,
         result_.camera_matrix_right, 
@@ -706,11 +829,44 @@ bool StereoCalibrator::calibrate() {
     auto end_right = std::chrono::high_resolution_clock::now();
     auto duration_right = std::chrono::duration_cast<std::chrono::milliseconds>(end_right - start_right);
     
-    // 4. 双目标定
-    // 使用与单目标定相同的畸变模型，固定高阶项k3,k4,k5以提高稳定性
+    // ========== 阶段 2: 使用真实 3D 坐标精确标定 ==========
+    if (need_two_stage) {
+        std::cout << "  [阶段 2: 使用真实 3D 坐标精确标定]" << std::endl;
+        
+        // 左相机精确标定
+        result_.rms_left = cv::calibrateCamera(
+            object_points_real, 
+            left_image_points, 
+            image_size_,
+            result_.camera_matrix_left, 
+            result_.dist_coeffs_left,
+            rvecs_left_, 
+            tvecs_left_,
+            cv::CALIB_USE_INTRINSIC_GUESS + cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+            cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
+        );
+        
+        // 右相机精确标定
+        result_.rms_right = cv::calibrateCamera(
+            object_points_real, 
+            right_image_points, 
+            image_size_,
+            result_.camera_matrix_right, 
+            result_.dist_coeffs_right,
+            rvecs_right_, 
+            tvecs_right_,
+            cv::CALIB_USE_INTRINSIC_GUESS + cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+            cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
+        );
+    }
+    
+    // ========== 双目标定 ==========
+    // 使用真实 3D 坐标（如果可用）进行双目标定
+    auto& object_points_stereo = need_two_stage ? object_points_real : object_points_flat;
+    
     auto start_stereo = std::chrono::high_resolution_clock::now();
     result_.rms_stereo = cv::stereoCalibrate(
-        object_points, 
+        object_points_stereo, 
         left_image_points, 
         right_image_points,
         result_.camera_matrix_left, 
@@ -940,20 +1096,42 @@ std::vector<cv::Point2f> StereoCalibrator::extractCenters(const std::vector<Elli
 }
 
 /**
- * @brief 生成所有圆的世界坐标
+ * @brief 生成所有圆点的世界坐标
+ * 
+ * @param flatten_z 是否将 Z 坐标强制设为 0（平面化）
+ *                  - true: 用于初始标定（OpenCV 需要平面点来估计初始内参）
+ *                  - false: 使用真实 Z 值进行精确标定
+ * 
+ * 根据配置选择自动生成或使用外部文件加载的坐标
  */
-std::vector<cv::Point3f> StereoCalibrator::generateWorldCoordinates() {
+std::vector<cv::Point3f> StereoCalibrator::generateWorldCoordinates(bool flatten_z) {
     std::vector<cv::Point3f> world_points;
-    world_points.reserve(board_config_.rows * board_config_.cols);
     
-    // 按行列顺序生成世界坐标
-    for (int r = 0; r < board_config_.rows; ++r) {
-        for (int c = 0; c < board_config_.cols; ++c) {
-            world_points.push_back(cv::Point3f(
-                c * board_config_.circle_spacing,
-                r * board_config_.circle_spacing,
-                0.0f
-            ));
+    if (board_config_.auto_generate_coords) {
+        // 自动生成模式：按行列顺序生成世界坐标（Z 始终为 0）
+        world_points.reserve(board_config_.rows * board_config_.cols);
+        
+        for (int r = 0; r < board_config_.rows; ++r) {
+            for (int c = 0; c < board_config_.cols; ++c) {
+                world_points.push_back(cv::Point3f(
+                    c * board_config_.circle_spacing,
+                    r * board_config_.circle_spacing,
+                    0.0f
+                ));
+            }
+        }
+    } else {
+        // 外部文件模式：使用预加载的坐标数据
+        world_points.reserve(board_config_.world_coords.size());
+        
+        for (const auto& pt : board_config_.world_coords) {
+            if (flatten_z) {
+                // 平面化：用于初始标定
+                world_points.push_back(cv::Point3f(pt.coord.x, pt.coord.y, 0.0f));
+            } else {
+                // 使用真实 Z：用于精确标定
+                world_points.push_back(pt.coord);
+            }
         }
     }
     

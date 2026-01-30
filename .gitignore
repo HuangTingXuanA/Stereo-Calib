@@ -2,9 +2,10 @@ build/
 .kiro/
 .vscode/
 images/
-test_images/
+test_images*
 debug_img/
 dataset/
+DATA/
 runs/
 *.txt
 *.zip

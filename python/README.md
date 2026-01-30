@@ -42,10 +42,10 @@ x_anylabeling
 python train.py --data data.yaml --epochs 100
 
 # 4. 推理测试
-python inference.py --model runs/segment/calibration_board/weights/best.pt --source test.jpg --show
+python inference.py --model runs/calibration_board/weights/best.pt --source test.jpg --show
 
 # 5. 导出ONNX
-python export_onnx.py --model runs/segment/calibration_board/weights/best.pt
+python export_onnx.py --model runs/calibration_board/weights/best.pt
 
 # 6. 调试ONNX
 python debug_onnx.py --model models/calibration_board_seg_dynamic.onnx --image test_images/left/image_0.bmp

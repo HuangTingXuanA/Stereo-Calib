@@ -77,8 +77,10 @@ private:
     /** @brief 从椭圆列表中提取圆心坐标 */
     std::vector<cv::Point2f> extractCenters(const std::vector<Ellipse>& ellipses);
     
-    /** @brief 生成所有圆的世界坐标 */
-    std::vector<cv::Point3f> generateWorldCoordinates();
+    /** @brief 生成所有圆的世界坐标 
+     *  @param flatten_z 是否将 Z 设为 0（true: 初始标定用, false: 精确标定用）
+     */
+    std::vector<cv::Point3f> generateWorldCoordinates(bool flatten_z = true);
     
     /** @brief 计算重投影误差 */
     void computeReprojectionErrors();
@@ -87,7 +89,8 @@ private:
     void evaluateGeometricConsistency();
 
     /** @brief 查找特征大圆 */
-    bool findAnchors(const std::vector<Ellipse>& ellipses, std::vector<Ellipse>& out_anchors);
+    bool findAnchors(const std::vector<Ellipse>& ellipses, std::vector<Ellipse>& out_anchors, 
+                     const std::string& image_name = "", std::string* error_msg = nullptr);
     
     /** @brief 保存带掩码的调试图像 */
     void saveDebugImageWithMask(
