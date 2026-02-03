@@ -893,10 +893,10 @@ void ArcExtractor::computePolarity(const cv::Mat& gradImage) {
 
         if (count > 0) {
             double avgProj = totalProj / count;
-            // Use slightly stricter threshold
-            if (avgProj > 0.05) polarities_[i] = 1;       // Gradient points Inward (Bright Ellipse / Anti-parallel) -> Polarity 1
-            else if (avgProj < -0.05) polarities_[i] = -1; // Gradient points Outward (Dark Ellipse / Parallel) -> Polarity -1
-            else polarities_[i] = 0;
+            // 使用参数化阈值判断极性
+            if (avgProj > params_.polarityThresh) polarities_[i] = 1;       // 梯度指向内部 -> 亮内暗外
+            else if (avgProj < -params_.polarityThresh) polarities_[i] = -1; // 梯度指向外部 -> 暗内亮外
+            else polarities_[i] = 0;  // 极性不明确
         } else {
             polarities_[i] = 0;
         }

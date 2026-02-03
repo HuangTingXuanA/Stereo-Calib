@@ -453,7 +453,12 @@ bool StereoCalibrator::detectCircles() {
             }
             continue;
         }
-        
+
+        saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
+                                "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
+        saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
+                                "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
+
         // 保存结果
         image_pairs_[i].left_centers = left_centers;
         image_pairs_[i].right_centers = right_centers;
@@ -533,92 +538,67 @@ void StereoCalibrator::saveDebugImageWithMask(
 
 bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::vector<Ellipse>& out_anchors, 
                                    const std::string& image_name, std::string* error_msg) {
-    (void)image_name;  // 参数仅用于日志，现改为通过 error_msg 返回
+    (void)image_name;
     /**
-     * RANSAC风格锚点匹配算法 (透视变换鲁棒版)
+     * RANSAC风格锚点匹配算法 (透视变换鲁棒版 + 一对一匹配改进)
      * 
      * 算法思路:
      *   1. 取面积最大的前K个椭圆作为候选锚点
      *   2. 枚举所有 C(K,5) 种组合，每种尝试 5! 种排列
      *   3. 对每种排列，计算单应性 H (模型->图像)
      *   4. 反向验证：用 H^-1 将所有检测椭圆投影到模型空间
-     *   5. 检查投影点是否落在网格点附近（内点验证）
-     *   6. 选择内点数最多的排列
-     * 
-     * 这种方法的优点:
-     *   - 不依赖像素距离比例（对透视变换鲁棒）
-     *   - 使用所有检测点进行验证（对误检鲁棒）
-     *   - 通过内点数自然处理椭圆数量不确定的情况
+     *   5. 一对一匹配：每个网格点只能被匹配一次（关键改进）
+     *   6. 选择唯一匹配数最多的排列
      */
     
-    if (ellipses.size() < 5) return false;
+    if (ellipses.size() < 5) {
+        if (error_msg) *error_msg = "椭圆数量不足5个";
+        return false;
+    }
     
-    // 1. 按面积降序排序，取前K个候选
+    // ========== 1. 准备锚点的模型坐标 ==========
+    std::vector<cv::Point2f> anchor_model_pts(5);
+    
+    if (board_config_.auto_generate_coords) {
+        if (board_config_.anchors.size() != 5) return false;
+        const float spacing = board_config_.circle_spacing;
+        for (const auto& [id, grid_pos] : board_config_.anchors) {
+            if (id >= 0 && id < 5) {
+                anchor_model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
+            }
+        }
+    } else {
+        if (board_config_.anchor_labels.size() != 5) return false;
+        std::map<std::string, cv::Point3f> label_to_coord;
+        for (const auto& pt : board_config_.world_coords) {
+            label_to_coord[pt.label] = pt.coord;
+        }
+        for (size_t id = 0; id < 5; ++id) {
+            const std::string& label = board_config_.anchor_labels[id];
+            auto it = label_to_coord.find(label);
+            if (it == label_to_coord.end()) {
+                if (error_msg) *error_msg = "找不到锚点标签: " + label;
+                return false;
+            }
+            anchor_model_pts[id] = cv::Point2f(it->second.x, it->second.y);
+        }
+    }
+    
+    // ========== 2. 按面积排序，取前K个候选 ==========
     std::vector<Ellipse> sorted = ellipses;
     std::sort(sorted.begin(), sorted.end(), [](const Ellipse& a, const Ellipse& b) {
         return (a.a * a.b) > (b.a * b.b);
     });
     
-    // 增加候选数到15，应对更多误检
+    // 增加候选数量：算法效率极高，设为 15 以应对锚点面积不占绝对优势的情况
     int n_cand = std::min(static_cast<int>(sorted.size()), 7);
     std::vector<Ellipse> candidates(sorted.begin(), sorted.begin() + n_cand);
     
-    // 2. 准备锚点的模型坐标
-    std::vector<cv::Point2f> anchor_model_pts(5);
-    
-    if (board_config_.auto_generate_coords) {
-        // 自动生成模式：从 anchors (row, col) 映射计算模型坐标
-        if (board_config_.anchors.size() != 5) return false;
-        
-        const float spacing = board_config_.circle_spacing;
-        for (const auto& [id, grid_pos] : board_config_.anchors) {
-            if (id >= 0 && id < 5) {
-                // 注意: board.yaml中 [row, col] -> 模型坐标 (col*spacing, row*spacing)
-                anchor_model_pts[id] = cv::Point2f(grid_pos.x * spacing, grid_pos.y * spacing);
-            }
-        }
-    } else {
-        // 外部文件模式：从 anchor_labels 查找对应的3D坐标
-        if (board_config_.anchor_labels.size() != 5) return false;
-        
-        // 构建标签到坐标的映射
-        std::map<std::string, cv::Point3f> label_to_coord;
-        for (const auto& pt : board_config_.world_coords) {
-            label_to_coord[pt.label] = pt.coord;
-        }
-        
-        for (size_t id = 0; id < 5; ++id) {
-            const std::string& label = board_config_.anchor_labels[id];
-            auto it = label_to_coord.find(label);
-            if (it == label_to_coord.end()) {
-                std::cerr << "[findAnchors] 找不到锚点标签: " << label << std::endl;
-                return false;
-            }
-            // 使用 X, Y 作为2D模型坐标（Z通常接近0）
-            anchor_model_pts[id] = cv::Point2f(it->second.x, it->second.y);
-        }
-    }
-    
-    // 3. 准备所有检测椭圆的中心点
-    std::vector<cv::Point2f> all_detected;
-    all_detected.reserve(ellipses.size());
-    for (const auto& e : ellipses) {
-        all_detected.emplace_back(e.center.x, e.center.y);
-    }
-    
-    // 4. RANSAC风格暴力搜索
-    // 复杂度: C(15,5) * 5! = 3003 * 120 = 360,360 次迭代（可接受）
-    
-    int best_inliers = -1;
-    double best_fit_error = 1e9;
-    std::vector<Ellipse> best_anchors;
-    
-    // 准备模型空间中的所有目标点
+    // ========== 3. 准备模型空间中的所有网格点 ==========
     std::vector<cv::Point2f> model_grid_pts;
-    double min_dist_between_pts = 1e9;  // 用于计算容差
+    double min_dist_between_pts = 1e9;
     
     if (board_config_.auto_generate_coords) {
-        // 自动生成模式：生成规则网格
         const float spacing = board_config_.circle_spacing;
         for (int r = 0; r < board_config_.rows; ++r) {
             for (int c = 0; c < board_config_.cols; ++c) {
@@ -627,11 +607,9 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
         }
         min_dist_between_pts = spacing;
     } else {
-        // 外部文件模式：使用预加载的坐标
         for (const auto& pt : board_config_.world_coords) {
             model_grid_pts.emplace_back(pt.coord.x, pt.coord.y);
         }
-        // 计算点间最小距离
         for (size_t i = 0; i < model_grid_pts.size(); ++i) {
             for (size_t j = i + 1; j < model_grid_pts.size(); ++j) {
                 double d = cv::norm(model_grid_pts[i] - model_grid_pts[j]);
@@ -644,97 +622,149 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     
     // 内点阈值：与最近网格点的距离 < min_dist / 4
     const double GRID_TOLERANCE = min_dist_between_pts / 4.0;
+    const int expected_grid_pts = static_cast<int>(model_grid_pts.size());
     
-    // 生成组合的位掩码
+    // ========== 4. 准备所有检测点 ==========
+    std::vector<cv::Point2f> all_detected;
+    for (const auto& e : ellipses) {
+        all_detected.emplace_back(e.center.x, e.center.y);
+    }
+    
+    // ========== 5. RANSAC风格搜索 (优化版) ==========
+    int best_unique_matches = -1;
+    double best_fit_error = 1e9;
+    std::vector<Ellipse> best_anchors;
+    
+    // 内部结构：带原始索引的点
+    struct IndexedPoint {
+        cv::Point2f p;
+        int original_idx;
+    };
+    
+    // 助手函数：获取极角排序后的点序列及其原始索引
+    auto getPolarSortedPoints = [](const std::vector<cv::Point2f>& pts) {
+        std::vector<IndexedPoint> indexed;
+        for (int i = 0; i < (int)pts.size(); ++i) {
+            indexed.push_back({pts[i], i});
+        }
+        
+        cv::Point2f center(0, 0);
+        for (const auto& ip : indexed) center += ip.p;
+        center.x /= indexed.size();
+        center.y /= indexed.size();
+        
+        std::sort(indexed.begin(), indexed.end(), [center](const IndexedPoint& a, const IndexedPoint& b) {
+            return std::atan2(a.p.y - center.y, a.p.x - center.x) < 
+                   std::atan2(b.p.y - center.y, b.p.x - center.x);
+        });
+        return indexed;
+    };
+
+    // 1. 对模型锚点进行预排序，并记录它们在原始 anchor_model_pts 中的位置
+    std::vector<IndexedPoint> model_indexed = getPolarSortedPoints(anchor_model_pts);
+
+    // 枚举所有 C(n_cand, 5) 组合
     std::vector<int> combo(n_cand, 0);
     std::fill(combo.begin(), combo.begin() + 5, 1);
     
     do {
-        // 提取当前组合的5个候选
-        std::vector<Ellipse> subset;
-        subset.reserve(5);
+        // 提取当前组合的5个候选中心
+        std::vector<cv::Point2f> subset_pts;
+        std::vector<Ellipse> subset_ellipses;
         for (int i = 0; i < n_cand; ++i) {
-            if (combo[i]) subset.push_back(candidates[i]);
+            if (combo[i]) {
+                subset_pts.push_back(candidates[i].center);
+                subset_ellipses.push_back(candidates[i]);
+            }
         }
         
-        // 尝试所有 5! 种排列
-        std::vector<int> perm = {0, 1, 2, 3, 4};
-        do {
-            // 构建当前排列的检测点
-            std::vector<cv::Point2f> detected_pts(5);
-            for (int k = 0; k < 5; ++k) {
-                detected_pts[k] = cv::Point2f(subset[perm[k]].center.x, subset[perm[k]].center.y);
-            }
-            
-            // 计算单应性: 模型 -> 图像
-            cv::Mat H = cv::findHomography(anchor_model_pts, detected_pts, 0);
-            if (H.empty()) continue;
-            
-            // 快速验证：5点拟合误差
-            std::vector<cv::Point2f> reproj;
-            cv::perspectiveTransform(anchor_model_pts, reproj, H);
-            double fit_error = 0;
-            for (int k = 0; k < 5; ++k) {
-                fit_error += cv::norm(reproj[k] - detected_pts[k]);
-            }
-            if (fit_error > 10.0) continue;  // 5点拟合误差应该很小
-            
-            // 反向投影验证：将所有检测点投影到模型空间
-            cv::Mat H_inv = H.inv();
-            if (H_inv.empty()) continue;
-            
-            std::vector<cv::Point2f> back_projected;
-            cv::perspectiveTransform(all_detected, back_projected, H_inv);
-            
-            // 计算内点数：检查投影点是否落在预定义网格点附近
-            int inliers = 0;
-            for (const auto& bp : back_projected) {
-                // 找最近的网格点
-                double min_dist = 1e9;
-                for (const auto& gp : model_grid_pts) {
-                    double d = cv::norm(bp - gp);
-                    if (d < min_dist) min_dist = d;
+        // --- 几何过滤 1: 凸包检查 ---
+        std::vector<int> hull_indices;
+        cv::convexHull(subset_pts, hull_indices);
+        if (hull_indices.size() != 5) continue;
+
+        // 2. 对当前检测到的子集进行极角排序
+        std::vector<IndexedPoint> det_indexed = getPolarSortedPoints(subset_pts);
+
+        // --- 3. 枚举 5 种循环移位匹配 (支持正向 CCW 和反向 CW) ---
+        for (int direction = 0; direction < 2; ++direction) {
+            for (int shift = 0; shift < 5; ++shift) {
+                // 我们需要将检测点还原回与原始 anchor_model_pts 一致的顺序
+                std::vector<cv::Point2f> ordered_detected(5);
+                std::vector<Ellipse> ordered_subset_ellipses(5);
+                
+                for (int i = 0; i < 5; ++i) {
+                    // model_indexed[i] 应该与 det_indexed 序列配对
+                    // direction 0: 正向 (i+shift), direction 1: 反向 (shift-i+5)
+                    int det_pos = (direction == 0) ? (i + shift) % 5 : (shift - i + 5) % 5;
+                    
+                    int m_orig_idx = model_indexed[i].original_idx;
+                    int d_subset_idx = det_indexed[det_pos].original_idx;
+                    
+                    ordered_detected[m_orig_idx] = subset_pts[d_subset_idx];
+                    ordered_subset_ellipses[m_orig_idx] = subset_ellipses[d_subset_idx];
+                }
+
+                // 计算单应性: 原始顺序模型坐标 -> 还原顺序后的检测坐标
+                cv::Mat H = cv::findHomography(anchor_model_pts, ordered_detected, 0);
+                if (H.empty()) continue;
+                
+                // 快速验证：5点拟合误差
+                std::vector<cv::Point2f> reproj;
+                cv::perspectiveTransform(anchor_model_pts, reproj, H);
+                double fit_error = 0;
+                for (int k = 0; k < 5; ++k) {
+                    fit_error += cv::norm(reproj[k] - ordered_detected[k]);
+                }
+                if (fit_error > 30.0) continue; 
+                
+                // 反向投影验证全网格
+                cv::Mat H_inv = H.inv();
+                if (H_inv.empty()) continue;
+                
+                std::vector<cv::Point2f> back_projected;
+                cv::perspectiveTransform(all_detected, back_projected, H_inv);
+                
+                // 一对一匹配
+                std::vector<bool> grid_matched(expected_grid_pts, false);
+                int unique_matches = 0;
+                for (const auto& bp : back_projected) {
+                    double min_dist = 1e9;
+                    int best_grid_idx = -1;
+                    for (int g = 0; g < expected_grid_pts; ++g) {
+                        if (grid_matched[g]) continue;
+                        double d = cv::norm(bp - model_grid_pts[g]);
+                        if (d < min_dist) {
+                            min_dist = d;
+                            best_grid_idx = g;
+                        }
+                    }
+                    if (min_dist < GRID_TOLERANCE && best_grid_idx >= 0) {
+                        grid_matched[best_grid_idx] = true;
+                        unique_matches++;
+                    }
                 }
                 
-                if (min_dist < GRID_TOLERANCE) {
-                    inliers++;
+                if (unique_matches > best_unique_matches || (unique_matches == best_unique_matches && fit_error < best_fit_error)) {
+                    best_unique_matches = unique_matches;
+                    best_fit_error = fit_error;
+                    best_anchors = ordered_subset_ellipses;
                 }
             }
-            
-            // 更新最佳结果
-            // 优先选择内点多的，内点相同时选择拟合误差小的
-            bool update = false;
-            if (inliers > best_inliers) {
-                update = true;
-            } else if (inliers == best_inliers && fit_error < best_fit_error) {
-                update = true;
-            }
-            
-            if (update) {
-                best_inliers = inliers;
-                best_fit_error = fit_error;
-                best_anchors.resize(5);
-                for (int k = 0; k < 5; ++k) {
-                    best_anchors[k] = subset[perm[k]];
-                }
-            }
-            
-        } while (std::next_permutation(perm.begin(), perm.end()));
-        
+        }
     } while (std::prev_permutation(combo.begin(), combo.end()));
     
-    // 5. 输出结果
-    if (best_inliers < 0) {
+    // ========== 6. 输出结果 ==========
+    if (best_unique_matches < 0) {
         if (error_msg) *error_msg = "未找到有效的锚点组合";
         return false;
     }
     
-    // 要求至少有50%的检测点是内点
-    // 这个阈值比较宽松，因为可能有误检和漏检
+    // 要求至少有50%的检测点是有效内点
     int min_required = static_cast<int>(ellipses.size() * 0.5);
-    if (best_inliers < min_required) {
+    if (best_unique_matches < min_required) {
         if (error_msg) {
-            *error_msg = "锚点内点过少: " + std::to_string(best_inliers) + "/" + 
+            *error_msg = "锚点内点过少: " + std::to_string(best_unique_matches) + "/" + 
                          std::to_string(ellipses.size()) + " (需要至少" + std::to_string(min_required) + ")";
         }
         return false;

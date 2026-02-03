@@ -6,6 +6,7 @@
  * - EdgeParams: 边缘检测参数
  * - ArcParams: 圆弧提取参数  
  * - FitParams: 拟合与验证参数
+ * - RefineParams: 二次拟合参数
  * - DetectorParams: 聚合所有参数
  */
 
@@ -20,9 +21,9 @@
  * @brief 梯度算子类型
  */
 enum class GradientOperator {
-    PREWITT = 101,
-    SOBEL = 102,
-    SCHARR = 103
+    PREWITT = 101,  // Prewitt 算子：计算简单，抗噪性较弱
+    SOBEL = 102,    // Sobel 算子：兼顾计算效率和抗噪性（推荐）
+    SCHARR = 103    // Scharr 算子：精度最高，对噪声敏感
 };
 
 // ============================================================================
@@ -32,15 +33,15 @@ enum class GradientOperator {
 /**
  * @brief 边缘检测参数
  * 
- * 用于 Edge Drawing (ED) 算法的边缘提取
+ * 用于 Edge Drawing (ED) 算法的边缘提取阶段
  */
 struct EdgeParams {
-    GradientOperator op = GradientOperator::SOBEL;  // 梯度算子
-    int gradThresh = 35;       // 梯度阈值
-    int anchorThresh = 15;      // 锚点阈值
-    int scanInterval = 1;      // 扫描间隔
-    int minPathLen = 5;       // 最小路径长度
-    double sigma = 0.5;        // 高斯平滑参数（0: 禁用, >0: 启用并指定标准差）
+    GradientOperator op = GradientOperator::SOBEL;  // 梯度算子类型
+    int gradThresh = 25;       // 梯度幅值阈值：低于此值的像素不被视为边缘候选
+    int anchorThresh = 10;     // 锚点梯度阈值：锚点是边缘追踪的起始点，需要更强的梯度响应
+    int scanInterval = 1;      // 锚点扫描间隔：每隔多少像素检查一次锚点候选（值越大速度越快但可能漏检）
+    int minPathLen = 3;        // 最小边缘路径长度：短于此长度的边缘段会被丢弃（用于去除噪声）
+    double sigma = 0.5;        // 高斯平滑标准差：0表示禁用平滑，>0表示预处理平滑（可降噪但会模糊边缘）
 };
 
 // ============================================================================
@@ -50,13 +51,14 @@ struct EdgeParams {
 /**
  * @brief 圆弧提取参数
  * 
- * 用于从边缘段中提取平滑圆弧
+ * 用于从边缘段中提取平滑圆弧，包括 RDP 简化和尖角分割
  */
 struct ArcParams {
-    double epsilon = 0.6;      // RDP 多边形逼近阈值
-    double sharpAngle = 100.0;  // 尖角阈值（度）
-    int minArcLength = 5;     // 最小圆弧长度
-    int threads = 8;           // 并行线程数
+    double epsilon = 0.8;       // RDP多边形逼近阈值：控制边缘简化程度（值越大简化程度越高）
+    double sharpAngle = 120.0;  // 尖角阈值（度）：相邻线段夹角小于此值时在该点分割圆弧
+    int minArcLength = 3;       // 最小圆弧长度：短于此长度的圆弧会被丢弃
+    int threads = 8;            // 并行线程数：用于多线程 RDP 处理
+    double polarityThresh = 0.05; // 极性判断阈值：梯度投影值的绝对值大于此阈值才确定极性方向
 };
 
 // ============================================================================
@@ -66,52 +68,69 @@ struct ArcParams {
 /**
  * @brief 拟合与验证参数
  * 
- * 用于椭圆拟合、评分和梯度验证
+ * 用于椭圆拟合、评分计算和梯度方向验证
  */
 struct FitParams {
     // ========== 配对约束参数 ==========
-    double thLengthRatio = 5.0;    // 弧长比限制
-    double thDistance = 1.2;       // 距离限制系数
+    double thLengthRatio = 5.0;    // 弧长比限制：两个待配对圆弧的长度比不能超过此值
+    double thDistance = 1.2;       // 距离限制系数：两圆弧中点距离应小于此系数乘以弧长之和
     
     // ========== 评分参数 ==========
-    double minEdgeScore = 0.33;    // 最小边缘评分
-    double minEllipseScore1 = 0.35; // 椭圆评分阈值1（内点率）
-    double minEllipseScore2 = 0.35;// 椭圆评分阈值2（覆盖率）
-    double inlierDist = 1.5;       // 内点距离阈值
+    double minEdgeScore = 0.5;     // 最小边缘评分：配对时要求的最低内点率
+    double minEllipseScore1 = 0.4; // 椭圆评分阈值1：内点数/总点数的最低要求
+    double minEllipseScore2 = 0.4; // 椭圆评分阈值2：内点数/椭圆周长的最低覆盖率
+    double inlierDist = 1.5;       // 内点距离阈值（像素）：点到椭圆的距离小于此值视为内点
     
-    // ========== 验证参数 ==========
-    double remainScore = 0.8;     // 梯度验证保留分数阈值
-    int sampleNum = 48;           // 椭圆采样点数
-    int gradRadius = 1;            // 梯度平均半径
-    double gradAngleThresh = 35.0; // 梯度角度阈值（度）
+    // ========== 梯度验证参数 ==========
+    double remainScore = 0.9;      // 梯度验证通过率阈值：采样点中梯度方向正确的比例需大于此值
+    int sampleNum = 60;            // 椭圆采样点数：用于梯度方向验证的均匀采样点数量
+    int gradRadius = 2;            // 梯度平滑半径：计算某点的梯度时参考的邻域像素范围
+    double gradAngleThresh = 38.0; // 梯度角度阈值（度）：梯度方向与椭圆法线夹角需小于此值
     
     // ========== 聚类参数 ==========
-    double clusterDist = 10.0;     // 聚类距离阈值
+    double clusterDist = 10.0;     // 聚类距离阈值：参数空间中距离小于此值的椭圆视为重复检测
+    
+    // ========== 几何约束参数 ==========
+    double minAspectRatio = 0.3;   // 最小长短轴比：椭圆的短轴/长轴需大于此值（防止过扁平）
+    double maxAspectRatio = 5.0;   // 最大长短轴比：椭圆的长轴/短轴需小于此值（与minAspectRatio互为倒数关系）
+    double minEllipseRadius = 2.0; // 最小椭圆半轴（像素）：短轴小于此值的椭圆会被丢弃
     
     // ========== 极性约束参数 ==========
-    int polarity = 0;              // 边缘极性约束（0:无, 1:内亮外暗, -1:内暗外亮）
-    double minAspectRatio = 0.4;   // 最小长短轴比（偏心率约束）
-    int centerIntensityThresh = 0; // 圆心灰度阈值（0:自适应）
-    int brightCenterThresh = 100;  // 若 polarity=1: 检查 Center > brightCenterThresh
-    int darkCenterThresh = 100;    // 若 polarity=-1: 检查 Center < darkCenterThresh
+    int polarity = 0;              // 边缘极性约束：0=无约束, 1=内亮外暗(白圆黑底), -1=内暗外亮(黑圆白底)
+    int centerIntensityThresh = 0; // 圆心灰度阈值：0表示自适应计算，>0表示固定阈值
+    int brightCenterThresh = 100;  // 亮心阈值：当polarity=1时，检查圆心灰度>此值
+    int darkCenterThresh = 100;    // 暗心阈值：当polarity=-1时，检查圆心灰度<此值
 };
 
 // ============================================================================
-// 二次拟合参数
+// 二次拟合参数（精细化阶段）
 // ============================================================================
 
 /**
  * @brief 二次拟合参数
  * 
- * 用于在初步检测后基于 ROI 和原始梯度进行精细化拟合
+ * 用于在初步检测后基于 ROI 和原始梯度进行亚像素精细化拟合
+ * 采用 Levenberg-Marquardt 优化算法配合 Tukey Bisquare 鲁棒损失函数
  */
 struct RefineParams {
-    bool useRefine = true;         // 是否启用二次拟合
-    double roiRatio = 1.5;         // ROI 截取比例（相对于长轴）
-    int refineIter = 8;            // 迭代次数
-    double tukeyAlpha = 4;       // Tukey Loss 常数
-    int minGradient = 30;          // 最小梯度幅值阈值
-    int samplePoints = 0;          // 采样点数限制 (0表示使用所有高梯度点)
+    bool useRefine = true;         // 是否启用二次拟合：启用可提高精度但增加计算时间
+    double roiRatio = 1.65;         // ROI截取比例：相对于椭圆长轴的倍数，用于截取局部区域
+    
+    // ========== LM优化参数 ==========
+    int maxIter = 20;              // LM最大迭代次数：超过此次数强制停止优化
+    double lambdaInit = 0.01;      // LM初始阻尼系数：控制梯度下降与高斯牛顿法的权衡
+    double lambdaMin = 1e-6;       // LM最小阻尼系数：防止lambda过小导致数值不稳定
+    double convergeTol = 1e-2;     // 收敛阈值：参数更新量小于此值时认为已收敛
+    
+    // ========== 鲁棒拟合参数 ==========
+    double tukeyAlpha = 4.0;       // Tukey Bisquare 调谐系数：控制离群值的抑制强度（通常取4-5）
+    double tukeyMinC = 0.5;        // Tukey阈值下限（像素）：即使MAD估计的sigma很小也使用此最小阈值
+    
+    // ========== 边缘提取参数 ==========
+    int minGradient = 30;          // 最小梯度幅值阈值：ROI内梯度小于此值的像素不参与拟合
+    int minEdgePoints = 6;        // 最小边缘点数：有效边缘点少于此数则跳过该椭圆的精细化
+    int minROISize = 6;           // 最小ROI尺寸（像素）：ROI边长小于此值则跳过
+    int samplePoints = 0;          // 采样点数限制：0表示使用所有高梯度点，>0表示随机采样
 };
 
 // ============================================================================
@@ -121,14 +140,14 @@ struct RefineParams {
 /**
  * @brief 椭圆检测器统一参数
  * 
- * 聚合所有子模块参数，便于统一管理和调试
+ * 聚合所有子模块参数，便于统一管理和参数调试
  */
 struct DetectorParams {
-    EdgeParams edge;    // 边缘检测参数
-    ArcParams arc;      // 圆弧提取参数
-    FitParams fit;      // 拟合验证参数
-    RefineParams refine;// 二次拟合参数
-    int threads = 8;    // 并行线程数
+    EdgeParams edge;     // 边缘检测参数
+    ArcParams arc;       // 圆弧提取参数
+    FitParams fit;       // 拟合验证参数
+    RefineParams refine; // 二次拟合参数
+    int threads = 8;     // 全局并行线程数
 };
 
 #endif // PARAM_H
