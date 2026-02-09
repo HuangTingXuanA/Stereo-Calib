@@ -7,7 +7,7 @@ debug_img/
 dataset/
 DATA/
 runs/
-*.txt
 *.zip
 *.pt
 calibration.yaml
+!/python/runs/calibration_board/weights/
