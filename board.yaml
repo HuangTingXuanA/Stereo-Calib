@@ -11,7 +11,7 @@ board:
    # ===== 世界坐标生成模式 =====
    #   1 - 自动生成（规则网格，需设置 circle_spacing 和 anchor_circle）
    #   0 - 使用外部文件（从 coords_file 读取3D坐标和锚点标签）
-   auto_generate_coords: 0
+   auto_generate_coords: 1
    # ===== 自动生成模式专用参数 =====
    circle_spacing: 10.0        # 圆心间距（毫米）
    # ===== 外部文件模式专用参数 =====

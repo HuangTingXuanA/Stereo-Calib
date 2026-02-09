@@ -31,13 +31,19 @@ struct CalibrationResult {
     cv::Mat F;                       // 基础矩阵 3x3
     
     // 标定质量指标
-    double rms_left;                 // 左相机RMS误差
-    double rms_right;                // 右相机RMS误差
-    double rms_stereo;               // 双目RMS误差
+    double rms_left;                 // 左相机RMS误差 (px)
+    double rms_right;                // 右相机RMS误差 (px)
+    double rms_stereo;               // 双目RMS误差 (px)
+
+    // 3D重建误差 (mm)
+    double avg_3d_error;             // 平均3D重建误差
+    double max_3d_error;             // 最大3D重建误差
+    double min_3d_error;             // 最小3D重建误差
     
     // 构造函数：初始化误差值为0
     CalibrationResult() 
-        : rms_left(0.0), rms_right(0.0), rms_stereo(0.0) {}
+        : rms_left(0.0), rms_right(0.0), rms_stereo(0.0),
+          avg_3d_error(0.0), max_3d_error(0.0), min_3d_error(0.0) {}
 };
 
 /**

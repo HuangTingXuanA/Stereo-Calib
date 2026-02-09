@@ -454,11 +454,6 @@ bool StereoCalibrator::detectCircles() {
             continue;
         }
 
-        saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
-                                "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
-        saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
-                                "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
-
         // 保存结果
         image_pairs_[i].left_centers = left_centers;
         image_pairs_[i].right_centers = right_centers;
@@ -596,8 +591,6 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
     
     // ========== 3. 准备模型空间中的所有网格点 ==========
     std::vector<cv::Point2f> model_grid_pts;
-    double min_dist_between_pts = 1e9;
-    
     if (board_config_.auto_generate_coords) {
         const float spacing = board_config_.circle_spacing;
         for (int r = 0; r < board_config_.rows; ++r) {
@@ -605,23 +598,11 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
                 model_grid_pts.emplace_back(c * spacing, r * spacing);
             }
         }
-        min_dist_between_pts = spacing;
     } else {
         for (const auto& pt : board_config_.world_coords) {
             model_grid_pts.emplace_back(pt.coord.x, pt.coord.y);
         }
-        for (size_t i = 0; i < model_grid_pts.size(); ++i) {
-            for (size_t j = i + 1; j < model_grid_pts.size(); ++j) {
-                double d = cv::norm(model_grid_pts[i] - model_grid_pts[j]);
-                if (d > 1e-6 && d < min_dist_between_pts) {
-                    min_dist_between_pts = d;
-                }
-            }
-        }
     }
-    
-    // 内点阈值：与最近网格点的距离 < min_dist / 4
-    const double GRID_TOLERANCE = min_dist_between_pts / 4.0;
     const int expected_grid_pts = static_cast<int>(model_grid_pts.size());
     
     // ========== 4. 准备所有检测点 ==========
@@ -630,124 +611,147 @@ bool StereoCalibrator::findAnchors(const std::vector<Ellipse>& ellipses, std::ve
         all_detected.emplace_back(e.center.x, e.center.y);
     }
     
-    // ========== 5. RANSAC风格搜索 (优化版) ==========
+    // ========== 5. RANSAC风格搜索 (面积加权+全网格验证版) ==========
     int best_unique_matches = -1;
-    double best_fit_error = 1e9;
+    double best_full_rms = 1e9;
+    double best_area_score = -1.0;
     std::vector<Ellipse> best_anchors;
     
-    // 内部结构：带原始索引的点
     struct IndexedPoint {
         cv::Point2f p;
         int original_idx;
     };
     
-    // 助手函数：获取极角排序后的点序列及其原始索引
     auto getPolarSortedPoints = [](const std::vector<cv::Point2f>& pts) {
         std::vector<IndexedPoint> indexed;
-        for (int i = 0; i < (int)pts.size(); ++i) {
-            indexed.push_back({pts[i], i});
-        }
-        
+        for (int i = 0; i < (int)pts.size(); ++i) indexed.push_back({pts[i], i});
         cv::Point2f center(0, 0);
         for (const auto& ip : indexed) center += ip.p;
-        center.x /= indexed.size();
-        center.y /= indexed.size();
-        
+        center.x /= (float)indexed.size(); center.y /= (float)indexed.size();
         std::sort(indexed.begin(), indexed.end(), [center](const IndexedPoint& a, const IndexedPoint& b) {
-            return std::atan2(a.p.y - center.y, a.p.x - center.x) < 
-                   std::atan2(b.p.y - center.y, b.p.x - center.x);
+            return std::atan2(a.p.y - center.y, a.p.x - center.x) < std::atan2(b.p.y - center.y, b.p.x - center.x);
         });
         return indexed;
     };
 
-    // 1. 对模型锚点进行预排序，并记录它们在原始 anchor_model_pts 中的位置
     std::vector<IndexedPoint> model_indexed = getPolarSortedPoints(anchor_model_pts);
-
-    // 枚举所有 C(n_cand, 5) 组合
     std::vector<int> combo(n_cand, 0);
     std::fill(combo.begin(), combo.begin() + 5, 1);
     
     do {
-        // 提取当前组合的5个候选中心
         std::vector<cv::Point2f> subset_pts;
         std::vector<Ellipse> subset_ellipses;
+        double current_anchor_area_sum = 0;
         for (int i = 0; i < n_cand; ++i) {
             if (combo[i]) {
                 subset_pts.push_back(candidates[i].center);
                 subset_ellipses.push_back(candidates[i]);
+                current_anchor_area_sum += (candidates[i].a * candidates[i].b);
             }
         }
         
-        // --- 几何过滤 1: 凸包检查 ---
         std::vector<int> hull_indices;
         cv::convexHull(subset_pts, hull_indices);
         if (hull_indices.size() != 5) continue;
 
-        // 2. 对当前检测到的子集进行极角排序
         std::vector<IndexedPoint> det_indexed = getPolarSortedPoints(subset_pts);
 
-        // --- 3. 枚举 5 种循环移位匹配 (支持正向 CCW 和反向 CW) ---
         for (int direction = 0; direction < 2; ++direction) {
             for (int shift = 0; shift < 5; ++shift) {
-                // 我们需要将检测点还原回与原始 anchor_model_pts 一致的顺序
                 std::vector<cv::Point2f> ordered_detected(5);
                 std::vector<Ellipse> ordered_subset_ellipses(5);
-                
                 for (int i = 0; i < 5; ++i) {
-                    // model_indexed[i] 应该与 det_indexed 序列配对
-                    // direction 0: 正向 (i+shift), direction 1: 反向 (shift-i+5)
                     int det_pos = (direction == 0) ? (i + shift) % 5 : (shift - i + 5) % 5;
-                    
                     int m_orig_idx = model_indexed[i].original_idx;
                     int d_subset_idx = det_indexed[det_pos].original_idx;
-                    
                     ordered_detected[m_orig_idx] = subset_pts[d_subset_idx];
                     ordered_subset_ellipses[m_orig_idx] = subset_ellipses[d_subset_idx];
                 }
 
-                // 计算单应性: 原始顺序模型坐标 -> 还原顺序后的检测坐标
                 cv::Mat H = cv::findHomography(anchor_model_pts, ordered_detected, 0);
                 if (H.empty()) continue;
                 
-                // 快速验证：5点拟合误差
-                std::vector<cv::Point2f> reproj;
-                cv::perspectiveTransform(anchor_model_pts, reproj, H);
-                double fit_error = 0;
-                for (int k = 0; k < 5; ++k) {
-                    fit_error += cv::norm(reproj[k] - ordered_detected[k]);
-                }
-                if (fit_error > 30.0) continue; 
+                // --- 关卡 1: 退化检查 ---
+                if (std::abs(cv::determinant(H)) < 1e-11) continue; 
+
+                // --- 几何关卡 2: 锚点评分 ---
+                std::vector<cv::Point2f> reproj_anchors;
+                cv::perspectiveTransform(anchor_model_pts, reproj_anchors, H);
+                double fit_error_sum = 0;
+                for (int k = 0; k < 5; ++k) fit_error_sum += cv::norm(reproj_anchors[k] - ordered_detected[k]);
+                if ((fit_error_sum / 5.0) > 10.0) continue; 
                 
-                // 反向投影验证全网格
-                cv::Mat H_inv = H.inv();
-                if (H_inv.empty()) continue;
+                // --- 几何关卡 3: 全网格匹配与二次重拟合校验 ---
+                std::vector<cv::Point2f> projected_grid;
+                cv::perspectiveTransform(model_grid_pts, projected_grid, H);
                 
-                std::vector<cv::Point2f> back_projected;
-                cv::perspectiveTransform(all_detected, back_projected, H_inv);
+                std::vector<cv::Point2f> matched_model, matched_image;
+                double matched_others_area_sum = 0;
+                std::vector<bool> det_used(all_detected.size(), false);
+                const float PIXEL_TOL = 20.0f;
                 
-                // 一对一匹配
-                std::vector<bool> grid_matched(expected_grid_pts, false);
-                int unique_matches = 0;
-                for (const auto& bp : back_projected) {
-                    double min_dist = 1e9;
-                    int best_grid_idx = -1;
-                    for (int g = 0; g < expected_grid_pts; ++g) {
-                        if (grid_matched[g]) continue;
-                        double d = cv::norm(bp - model_grid_pts[g]);
-                        if (d < min_dist) {
-                            min_dist = d;
-                            best_grid_idx = g;
+                for (int i = 0; i < expected_grid_pts; ++i) {
+                    double min_dist = PIXEL_TOL;
+                    int best_det_idx = -1;
+                    for (int d = 0; d < (int)all_detected.size(); ++d) {
+                        if (det_used[d]) continue;
+                        double d_px = cv::norm(projected_grid[i] - all_detected[d]);
+                        if (d_px < min_dist) { min_dist = d_px; best_det_idx = d; }
+                    }
+                    if (best_det_idx >= 0) {
+                        det_used[best_det_idx] = true;
+                        matched_model.push_back(model_grid_pts[i]);
+                        matched_image.push_back(all_detected[best_det_idx]);
+                        // 记录非锚点的普通圆面积
+                        bool is_anchor = false;
+                        for(const auto& ae : ordered_subset_ellipses) {
+                            float dx = ae.center.x - all_detected[best_det_idx].x;
+                            float dy = ae.center.y - all_detected[best_det_idx].y;
+                            if (dx * dx + dy * dy < 1.0f) { is_anchor = true; break; }
+                        }
+                        if (!is_anchor) {
+                            matched_others_area_sum += (ellipses[best_det_idx].a * ellipses[best_det_idx].b);
                         }
                     }
-                    if (min_dist < GRID_TOLERANCE && best_grid_idx >= 0) {
-                        grid_matched[best_grid_idx] = true;
-                        unique_matches++;
+                }
+                
+                int unique_matches = (int)matched_model.size();
+                if (unique_matches < expected_grid_pts * 0.8) continue;
+
+                // --- 关卡 3: 全网格二次重拟合与 RMS 严选 ---
+                cv::Mat H_refined = cv::findHomography(matched_model, matched_image, 0);
+                if (H_refined.empty()) continue;
+
+                std::vector<cv::Point2f> final_reproj;
+                cv::perspectiveTransform(matched_model, final_reproj, H_refined);
+                double total_refined_dist = 0;
+                for(size_t i=0; i<matched_model.size(); ++i) total_refined_dist += cv::norm(final_reproj[i] - matched_image[i]);
+                double full_rms = total_refined_dist / unique_matches;
+
+                // 正确的网格匹配 full_rms 通常 < 0.5px，错位解通常 > 2.0px
+                if (full_rms > 4.0) continue; 
+
+                // --- 关卡 4: 面积特征增强 (锚点必须明显大于普通点) ---
+                double avg_anchor_area = current_anchor_area_sum / 5.0;
+                double avg_others_area = matched_others_area_sum / std::max(1, (unique_matches - 5));
+                double area_ratio = avg_anchor_area / std::max(1.0, avg_others_area);
+
+                // 评分机制：匹配数为主，RMS和面积比为辅
+                bool update = false;
+                if (unique_matches > best_unique_matches) {
+                    update = true;
+                } else if (unique_matches == best_unique_matches) {
+                    if (full_rms < (best_full_rms - 0.1)) {
+                        update = true;
+                    } else if (std::abs(full_rms - best_full_rms) < 0.1 && area_ratio > best_area_score) {
+                        update = true;
                     }
                 }
                 
-                if (unique_matches > best_unique_matches || (unique_matches == best_unique_matches && fit_error < best_fit_error)) {
+                if (update) {
                     best_unique_matches = unique_matches;
-                    best_fit_error = fit_error;
+                    best_full_rms = full_rms;
+                    best_area_score = area_ratio;
                     best_anchors = ordered_subset_ellipses;
                 }
             }
@@ -837,7 +841,7 @@ bool StereoCalibrator::calibrate() {
         result_.dist_coeffs_left,
         rvecs_left_, 
         tvecs_left_,
-        cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+        cv::CALIB_FIX_K3,
         cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
     );
     auto end_left = std::chrono::high_resolution_clock::now();
@@ -853,7 +857,7 @@ bool StereoCalibrator::calibrate() {
         result_.dist_coeffs_right,
         rvecs_right_, 
         tvecs_right_,
-        cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+        cv::CALIB_FIX_K3,
         cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
     );
     auto end_right = std::chrono::high_resolution_clock::now();
@@ -872,7 +876,7 @@ bool StereoCalibrator::calibrate() {
             result_.dist_coeffs_left,
             rvecs_left_, 
             tvecs_left_,
-            cv::CALIB_USE_INTRINSIC_GUESS + cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+            cv::CALIB_USE_INTRINSIC_GUESS,
             cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
         );
         
@@ -885,7 +889,7 @@ bool StereoCalibrator::calibrate() {
             result_.dist_coeffs_right,
             rvecs_right_, 
             tvecs_right_,
-            cv::CALIB_USE_INTRINSIC_GUESS + cv::CALIB_RATIONAL_MODEL + cv::CALIB_FIX_K3,
+            cv::CALIB_USE_INTRINSIC_GUESS,
             cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
         );
     }
@@ -908,11 +912,7 @@ bool StereoCalibrator::calibrate() {
         result_.T, 
         result_.E, 
         result_.F,
-        cv::CALIB_USE_INTRINSIC_GUESS + 
-        cv::CALIB_RATIONAL_MODEL + 
-        cv::CALIB_FIX_K3 + 
-        cv::CALIB_FIX_K4 + 
-        cv::CALIB_FIX_K5,
+        cv::CALIB_USE_INTRINSIC_GUESS,
         cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 150, 1e-6)
     );
     auto end_stereo = std::chrono::high_resolution_clock::now();
@@ -951,9 +951,13 @@ bool StereoCalibrator::saveResults(const std::string& yaml_path) {
     fs << "F" << result_.F;
     
     // 保存标定质量指标
-    fs << "rms_left" << result_.rms_left;
-    fs << "rms_right" << result_.rms_right;
-    fs << "rms_stereo" << result_.rms_stereo;
+    fs << "stereo_reprojection_error_px" << result_.rms_stereo;
+    fs << "left_reprojection_error_px" << result_.rms_left;
+    fs << "right_reprojection_error_px" << result_.rms_right;
+    
+    fs << "mean_3d_reconstruction_error_mm" << result_.avg_3d_error;
+    fs << "max_3d_reconstruction_error_mm" << result_.max_3d_error;
+    fs << "min_3d_reconstruction_error_mm" << result_.min_3d_error;
     
     // 保存标定板参数
     fs << "board_rows" << board_config_.rows;
@@ -1273,16 +1277,29 @@ void StereoCalibrator::computeReprojectionErrors() {
     
     // 最终总体误差
     if (!pair_3d_errors.empty()) {
-        double sum_sq = 0;
-        for (double e : pair_3d_errors) sum_sq += e * e;
-        double rms_3d = std::sqrt(sum_sq / pair_3d_errors.size());
-        std::cout << "最终双目重建RMS误差: " << std::fixed << std::setprecision(4) << rms_3d << " mm" << std::endl;
+        double sum_err = 0;
+        double max_err = -1.0;
+        double min_err = 1e9;
+        
+        for (double e : pair_3d_errors) {
+            sum_err += e;
+            if (e > max_err) max_err = e;
+            if (e < min_err) min_err = e;
+        }
+        
+        result_.avg_3d_error = sum_err / pair_3d_errors.size();
+        result_.max_3d_error = max_err;
+        result_.min_3d_error = min_err;
+        
+        std::cout << "平均3D重建误差: " << std::fixed << std::setprecision(4) << result_.avg_3d_error << " mm" << std::endl;
+        std::cout << "最大3D重建误差: " << std::fixed << std::setprecision(4) << result_.max_3d_error << " mm" << std::endl;
+        std::cout << "最小3D重建误差: " << std::fixed << std::setprecision(4) << result_.min_3d_error << " mm" << std::endl;
     }
 
     std::cout << "\n=== 重投影误差摘要 (OpenCV RMS) ===" << std::endl;
-    std::cout << "左相机 RMS: " << std::fixed << std::setprecision(4) << result_.rms_left << " px" << std::endl;
-    std::cout << "右相机 RMS: " << std::fixed << std::setprecision(4) << result_.rms_right << " px" << std::endl;
-    std::cout << "双目系统 RMS: " << std::fixed << std::setprecision(4) << result_.rms_stereo << " px" << std::endl;
+    std::cout << "左相机重投影误差: " << std::fixed << std::setprecision(4) << result_.rms_left << " px" << std::endl;
+    std::cout << "右相机重投影误差: " << std::fixed << std::setprecision(4) << result_.rms_right << " px" << std::endl;
+    std::cout << "双目重投影误差: " << std::fixed << std::setprecision(4) << result_.rms_stereo << " px" << std::endl;
 }
 
 /**

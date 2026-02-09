@@ -5,13 +5,43 @@
  * 从 EDSF 项目严格移植的边缘检测算法
  */
 
-#include "dsf.hpp"
+#include "dsf.h"
 #include <algorithm>
 #include <cstring>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ============================================================================
+// 算法内部常量 (仅在此文件内有效)
+// ============================================================================
+
+#define LEFT  1
+#define RIGHT 2
+#define UP    3
+#define DOWN  4
+
+#define EDGE_VERTICAL   1
+#define EDGE_HORIZONTAL 2
+
+// ============================================================================
+// 内部数据结构
+// ============================================================================
+
+struct Chain {
+    int dir;            // 链方向
+    int len;            // 像素数量
+    int parent;         // 父节点索引
+    int children[2];    // 子节点索引
+    cv::Point* pixels;  // 像素数组指针
+};
+
+struct StackNode {
+    int r, c;       // 起始像素坐标
+    int parent;     // 父链索引（-1表示无父节点）
+    int dir;        // 追踪方向
+};
 
 // ============================================================================
 // 边缘检测器实现
@@ -23,16 +53,24 @@ EdgeDetector::EdgeDetector(const cv::Mat& srcImage, const EdgeParams& params)
     // 参数合法性检查
     if (params_.gradThresh < 1) params_.gradThresh = 1;
     if (params_.anchorThresh < 0) params_.anchorThresh = 0;
-    if (params_.sigma < 0) params_.sigma = 0;
+    if (params_.sigma < 1.0) params_.sigma = 1.0;
     
     segmentPoints_.reserve(50);
     
     // 转换为灰度图像
+    cv::Mat grayImage;
     if (srcImage.channels() == 3) {
-        cv::cvtColor(srcImage, srcImage_, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(srcImage, grayImage, cv::COLOR_BGR2GRAY);
     } else {
-        srcImage_ = srcImage.clone();
+        grayImage = srcImage.clone();
     }
+    
+    // 初步平滑
+    if (params_.preBlurSize > 0) {
+        cv::GaussianBlur(grayImage, grayImage, cv::Size(params_.preBlurSize, params_.preBlurSize), params_.preBlurSigma);
+    }
+    
+    srcImage_ = grayImage;
     height_ = srcImage_.rows;
     width_ = srcImage_.cols;
     
@@ -46,15 +84,15 @@ EdgeDetector::EdgeDetector(const cv::Mat& srcImage, const EdgeParams& params)
     
     srcImg_ = srcImage_.data;
     
-    // 高斯平滑处理
-    if (params_.sigma > 0) {
+    // 高斯平滑
+    if (params_.sigma > 0 && params_.smoothBlurSize > 0) {
         if (params_.sigma == 1.0) {
-            cv::GaussianBlur(srcImage_, smoothImage_, cv::Size(5, 5), params_.sigma);
+            cv::GaussianBlur(srcImage_, smoothImage_, cv::Size(params_.smoothBlurSize, params_.smoothBlurSize), params_.sigma);
         } else {
             cv::GaussianBlur(srcImage_, smoothImage_, cv::Size(), params_.sigma);
         }
     } else {
-        smoothImage_ = srcImage_.clone(); // 禁用平滑
+        smoothImage_ = srcImage_.clone();
     }
     
     // 分配指针
@@ -70,9 +108,6 @@ EdgeDetector::EdgeDetector(const cv::Mat& srcImage, const EdgeParams& params)
     computeGradient();
     computeAnchorPoints();
     joinAnchorPointsUsingSortedAnchors();
-    
-    // 清理临时数据
-    delete[] dirImg_;
 }
 
 void EdgeDetector::computeGradient() {
@@ -116,12 +151,12 @@ void EdgeDetector::computeGradient() {
                     gy = std::abs(com1 - com2 + (smoothImg_[(i + 1) * width_ + j] - smoothImg_[(i - 1) * width_ + j]));
             }
             
-            int sum = gx + gy;
+            int sum = static_cast<int>(std::sqrt(static_cast<double>(gx * gx + gy * gy)));
             int index = i * width_ + j;
             gradImg_[index] = static_cast<short>(sum);
             
             if (sum >= params_.gradThresh) {
-                if (gx >= gy) {
+                if (std::abs(gx) >= std::abs(gy)) {
                     dirImg_[index] = EDGE_VERTICAL;
                 } else {
                     dirImg_[index] = EDGE_HORIZONTAL;
@@ -141,23 +176,32 @@ void EdgeDetector::computeAnchorPoints() {
         }
         
         for (int j = start; j < width_ - 2; j += inc) {
-            if (gradImg_[i * width_ + j] < params_.gradThresh) continue;
+            int currentGrad = gradImg_[i * width_ + j];
+            if (currentGrad < params_.gradThresh) continue;
             
             if (dirImg_[i * width_ + j] == EDGE_VERTICAL) {
-                // 垂直边缘
-                int diff1 = gradImg_[i * width_ + j] - gradImg_[i * width_ + j - 1];
-                int diff2 = gradImg_[i * width_ + j] - gradImg_[i * width_ + j + 1];
-                if (diff1 >= params_.anchorThresh && diff2 >= params_.anchorThresh) {
-                    edgeImg_[i * width_ + j] = ANCHOR_PIXEL;
-                    anchorPoints_.emplace_back(cv::Point(j, i));
+                // 垂直边缘 (寻找水平方向的极大值)
+                int leftGrad = gradImg_[i * width_ + j - 1];
+                int rightGrad = gradImg_[i * width_ + j + 1];
+                
+                // 改进逻辑：只要是局部极大值且满足最小差值要求即可
+                // 对于模糊边缘，这个差值可能很小
+                if (currentGrad > leftGrad && currentGrad > rightGrad) {
+                   if ((currentGrad - leftGrad) >= params_.anchorThresh || (currentGrad - rightGrad) >= params_.anchorThresh) {
+                        edgeImg_[i * width_ + j] = ANCHOR_PIXEL;
+                        anchorPoints_.emplace_back(cv::Point(j, i));
+                   }
                 }
             } else {
-                // 水平边缘
-                int diff1 = gradImg_[i * width_ + j] - gradImg_[(i - 1) * width_ + j];
-                int diff2 = gradImg_[i * width_ + j] - gradImg_[(i + 1) * width_ + j];
-                if (diff1 >= params_.anchorThresh && diff2 >= params_.anchorThresh) {
-                    edgeImg_[i * width_ + j] = ANCHOR_PIXEL;
-                    anchorPoints_.emplace_back(cv::Point(j, i));
+                // 水平边缘 (寻找垂直方向的极大值)
+                int upGrad = gradImg_[(i - 1) * width_ + j];
+                int downGrad = gradImg_[(i + 1) * width_ + j];
+                
+                if (currentGrad > upGrad && currentGrad > downGrad) {
+                    if ((currentGrad - upGrad) >= params_.anchorThresh || (currentGrad - downGrad) >= params_.anchorThresh) {
+                        edgeImg_[i * width_ + j] = ANCHOR_PIXEL;
+                        anchorPoints_.emplace_back(cv::Point(j, i));
+                    }
                 }
             }
         }
@@ -166,14 +210,11 @@ void EdgeDetector::computeAnchorPoints() {
     anchorNos_ = static_cast<int>(anchorPoints_.size());
 }
 
-void EdgeDetector::sortAnchorsByGradValue() {
-    auto sortFunc = [this](const cv::Point& a, const cv::Point& b) {
-        return gradImg_[a.y * width_ + a.x] > gradImg_[b.y * width_ + b.x];
-    };
-    std::sort(anchorPoints_.begin(), anchorPoints_.end(), sortFunc);
-}
+// ============================================================================
+// 搜索辅助函数 (Static Helpers)
+// ============================================================================
 
-int EdgeDetector::longestChain(Chain* chains, int root) {
+static int longestChain(Chain* chains, int root) {
     if (root == -1 || chains[root].len == 0) return 0;
     
     int len0 = 0;
@@ -198,7 +239,7 @@ int EdgeDetector::longestChain(Chain* chains, int root) {
     return chains[root].len + max;
 }
 
-int EdgeDetector::retrieveChainNos(Chain* chains, int root, int chainNos[]) {
+static int retrieveChainNos(Chain* chains, int root, int chainNos[]) {
     int count = 0;
     
     while (root != -1) {
@@ -215,6 +256,13 @@ int EdgeDetector::retrieveChainNos(Chain* chains, int root, int chainNos[]) {
     return count;
 }
 
+void EdgeDetector::sortAnchorsByGradValue() {
+    auto sortFunc = [this](const cv::Point& a, const cv::Point& b) {
+        return gradImg_[a.y * width_ + a.x] > gradImg_[b.y * width_ + b.x];
+    };
+    std::sort(anchorPoints_.begin(), anchorPoints_.end(), sortFunc);
+}
+
 void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
     int* chainNos = new int[(width_ + height_) * 8];
     cv::Point* pixels = new cv::Point[width_ * height_];
@@ -222,7 +270,7 @@ void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
     Chain* chains = new Chain[width_ * height_];
     
     // 按梯度值排序锚点
-    const int SIZE = 128 * 256;
+    const int SIZE = 128 * 256; // 梯度排序用的桶数量
     int* C = new int[SIZE];
     std::memset(C, 0, sizeof(int) * SIZE);
     
@@ -231,6 +279,7 @@ void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
         for (int j = 1; j < width_ - 1; j++) {
             if (edgeImg_[i * width_ + j] != ANCHOR_PIXEL) continue;
             int grad = gradImg_[i * width_ + j];
+            if (grad >= SIZE) grad = SIZE - 1; // 边界检查
             C[grad]++;
         }
     }
@@ -246,6 +295,7 @@ void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
         for (int j = 1; j < width_ - 1; j++) {
             if (edgeImg_[i * width_ + j] != ANCHOR_PIXEL) continue;
             int grad = gradImg_[i * width_ + j];
+            if (grad >= SIZE) grad = SIZE - 1; // 边界检查
             int index = --C[grad];
             A[index] = i * width_ + j;
         }
@@ -659,7 +709,7 @@ void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
                 
                 int totalLen2 = longestChain(chains, m);
                 
-                if (totalLen2 >= 10) {
+                if (totalLen2 >= params_.minAuxSegmentLen) {
                     int count = retrieveChainNos(chains, m, chainNos);
                     
                     noSegmentPixels = 0;
@@ -708,315 +758,10 @@ void EdgeDetector::joinAnchorPointsUsingSortedAnchors() {
         }
     }
     
-    // 移除最后一个空段
-    segmentPoints_.pop_back();
-    
     // 清理
     delete[] A;
     delete[] chains;
     delete[] stack;
     delete[] chainNos;
     delete[] pixels;
-}
-
-// ============================================================================
-// RDP 并行处理实现
-// ============================================================================
-
-ParallelRDP::ParallelRDP(std::vector<cv::Point>* edgeLists,
-                         std::vector<std::pair<int, int>>* segLists,
-                         double epsilon, int num, int threads)
-    : edgeLists_(edgeLists), segLists_(segLists),
-      epsilon_(epsilon), threads_(threads), num_(num) {
-    range_ = num / threads;
-}
-
-double ParallelRDP::perpendicularDistance2(const cv::Point& pt,
-                                            const cv::Point& lineStart,
-                                            const cv::Point& lineEnd) {
-    double dx = lineEnd.x - lineStart.x;
-    double dy = lineEnd.y - lineStart.y;
-    
-    double mag = std::sqrt(dx * dx + dy * dy);
-    if (mag > 0.0) {
-        dx /= mag;
-        dy /= mag;
-    }
-    
-    double pvx = pt.x - lineStart.x;
-    double pvy = pt.y - lineStart.y;
-    
-    double pvdot = dx * pvx + dy * pvy;
-    
-    double dsx = pvdot * dx;
-    double dsy = pvdot * dy;
-    
-    double ax = pvx - dsx;
-    double ay = pvy - dsy;
-    
-    return ax * ax + ay * ay;
-}
-
-void ParallelRDP::rdp(const std::vector<cv::Point>& edge,
-                      int l, int r, double epsilon, int id) const {
-    if (r - l < 2) return;
-    
-    double dMax = 0;
-    int idx = 0;
-    
-    for (int i = l + 1; i < r; i++) {
-        double d = perpendicularDistance2(edge[i], edge[l], edge[r - 1]);
-        if (d > dMax) {
-            idx = i;
-            dMax = d;
-        }
-    }
-    
-    if (dMax > epsilon) {
-        rdp(edge, l, idx + 1, epsilon, id);
-        rdp(edge, idx, r, epsilon, id);
-    } else {
-        segLists_[id].emplace_back(std::make_pair(l, r));
-    }
-}
-
-void ParallelRDP::operator()(const cv::Range& r) const {
-    for (int v = r.start; v < num_; v += threads_) {
-        if (edgeLists_[v].size() > 2) {
-            segLists_[v].reserve(10);
-            rdp(edgeLists_[v], 0, static_cast<int>(edgeLists_[v].size()),
-                epsilon_ * epsilon_, v);
-        }
-    }
-}
-
-// ============================================================================
-// 圆弧提取器实现
-// ============================================================================
-
-ArcExtractor::ArcExtractor(const std::vector<std::vector<cv::Point>>& edges,
-                           const ArcParams& params)
-    : params_(params), edges_(edges) {
-}
-
-void ArcExtractor::extract() {
-    runRDP();
-    splitEdge();
-    
-    // 对圆弧进行第二次 RDP
-    arcSegs_.resize(arcs_.size());
-    std::sort(arcs_.begin(), arcs_.end(),
-              [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b) {
-                  return a.size() > b.size();
-              });
-    
-    // 初始化极性数组
-    polarities_.resize(arcs_.size(), 0);
-
-    cv::parallel_for_(cv::Range(0, params_.threads),
-                      ParallelRDP(arcs_.data(), arcSegs_.data(),
-                                  params_.epsilon, static_cast<int>(arcs_.size()),
-                                  params_.threads));
-}
-
-void ArcExtractor::computePolarity(const cv::Mat& gradImage) {
-    if (gradImage.empty()) {
-        std::fill(polarities_.begin(), polarities_.end(), 0);
-        return;
-    }
-
-    int width = gradImage.cols;
-    int height = gradImage.rows;
-
-    // 计算梯度方向
-    cv::Mat dx, dy;
-    cv::Mat smoothImage;
-    // 需要平滑后的图像来计算梯度，或者直接使用输入的gradImage如果它包含了梯度方向信息
-    // 注意：EdgeResult 中的 gradImage 存储的是梯度幅值 (short 类型)。
-    // 这里我们假设传入的是原始平滑图像或者需要重新计算梯度。
-    // 但是 computePolarity 接口只接受 gradImage。
-    // 实际上，我们需要基于 smoothImage 计算 dx, dy 来获得梯度方向。
-    // 这里修改实现，假设传入的是平滑后的图像 smoothImage，而非梯度幅值图。
-    // 如果传入的是 EdgeResult.gradImage (幅值)，则无法计算方向。
-    // 但是 detectEdges 返回的 EdgeResult 包含 smoothImage。
-    // 因此调用者应该传入 smoothImage。
-    
-    // 为了稳健性，我们在函数内部计算 Sobel 梯度
-    cv::Sobel(gradImage, dx, CV_32F, 1, 0, 3);
-    cv::Sobel(gradImage, dy, CV_32F, 0, 1, 3);
-
-    for (size_t i = 0; i < arcs_.size(); ++i) {
-        const auto& arc = arcs_[i];
-        if (arc.size() < 5) { // Increase min points for polarity check
-            polarities_[i] = 0;
-            continue;
-        }
-
-        // Calculate Chord Center (Midpoint of start and end)
-        cv::Point start = arc.front();
-        cv::Point end = arc.back();
-        cv::Point2f chordMid = (cv::Point2f(start) + cv::Point2f(end)) * 0.5f;
-
-        double totalProj = 0.0;
-        int count = 0;
-
-        for (size_t j = 1; j < arc.size() - 1; ++j) {
-            cv::Point p = arc[j];
-            if (p.x < 0 || p.x >= width || p.y < 0 || p.y >= height) continue;
-
-            // Gradient Vector (vg)
-            float gx = dx.at<float>(p);
-            float gy = dy.at<float>(p);
-            double gradMag = std::sqrt(gx * gx + gy * gy);
-            
-            if (gradMag < 1e-5) continue;
-            
-            double vg_x = gx / gradMag;
-            double vg_y = gy / gradMag;
-            
-            // Inward Vector (v_in): From Point to Chord Center
-            // For a convex arc on an ellipse, the chord is strictly inside.
-            double v_in_x = chordMid.x - p.x;
-            double v_in_y = chordMid.y - p.y;
-            double v_in_mag = std::sqrt(v_in_x * v_in_x + v_in_y * v_in_y);
-            
-            if (v_in_mag < 1e-5) continue;
-            
-            v_in_x /= v_in_mag;
-            v_in_y /= v_in_mag;
-            
-            // Dot product
-            double dot = vg_x * v_in_x + vg_y * v_in_y;
-            totalProj += dot;
-            count++;
-        }
-
-        if (count > 0) {
-            double avgProj = totalProj / count;
-            // 使用参数化阈值判断极性
-            if (avgProj > params_.polarityThresh) polarities_[i] = 1;       // 梯度指向内部 -> 亮内暗外
-            else if (avgProj < -params_.polarityThresh) polarities_[i] = -1; // 梯度指向外部 -> 暗内亮外
-            else polarities_[i] = 0;  // 极性不明确
-        } else {
-            polarities_[i] = 0;
-        }
-    }
-}
-
-void ArcExtractor::runRDP() {
-    segList_.resize(edges_.size());
-    
-    // 按长度排序边缘
-    std::vector<std::vector<cv::Point>> sortedEdges = edges_;
-    std::sort(sortedEdges.begin(), sortedEdges.end(),
-              [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b) {
-                  return a.size() > b.size();
-              });
-    
-    edges_ = sortedEdges;
-    
-    cv::parallel_for_(cv::Range(0, params_.threads),
-                      ParallelRDP(edges_.data(), segList_.data(),
-                                  params_.epsilon, static_cast<int>(edges_.size()),
-                                  params_.threads));
-}
-
-void ArcExtractor::splitEdge() {
-    double thAngle = std::cos(params_.sharpAngle * M_PI / 180.0);
-    
-    for (size_t i = 0; i < segList_.size(); i++) {
-        if (edges_[i].size() < static_cast<size_t>(params_.minArcLength)) break;
-        if (segList_[i].size() < 2) continue;
-        
-        int preIndex = 0;
-        int preSegId = 0;
-        auto& seg = segList_[i];
-        
-        for (size_t j = 1; j < seg.size(); j++) {
-            bool isCornerPoint = false, isInflectionPoint = false;
-            
-            cv::Point l2_v = edges_[i][seg[j - 1].second - 1] - edges_[i][seg[j - 1].first];
-            cv::Point l3_v = edges_[i][seg[j].second - 1] - edges_[i][seg[j].first];
-            
-            double norm1 = cv::norm(l2_v);
-            double norm2 = cv::norm(l3_v);
-            if (norm1 > 0 && norm2 > 0) {
-                double angle = l2_v.dot(l3_v) / (norm1 * norm2);
-                if (angle <= thAngle) {
-                    isCornerPoint = true;
-                }
-            }
-            
-            if (j >= 2) {
-                cv::Point l1_v = edges_[i][seg[j - 2].second - 1] - edges_[i][seg[j - 2].first];
-                if (l1_v.cross(l2_v) * l2_v.cross(l3_v) < 0) {
-                    isInflectionPoint = true;
-                }
-            }
-            
-            if (isCornerPoint || isInflectionPoint) {
-                int len = seg[j].first - preIndex;
-                if (len > params_.minArcLength && static_cast<int>(j) - preSegId > 1) {
-                    arcs_.emplace_back(std::vector<cv::Point>(
-                        edges_[i].begin() + preIndex,
-                        edges_[i].begin() + seg[j].first));
-                    
-                    std::vector<cv::Point>& arc = arcs_.back();
-                    auto v1 = arc[arc.size() / 2] - arc.front();
-                    auto v2 = arc.back() - arc[arc.size() / 2];
-                    if (v1.cross(v2) > 0) {
-                        std::reverse(arc.begin(), arc.end());
-                    }
-                }
-                preIndex = seg[j].first;
-                preSegId = static_cast<int>(j);
-            }
-        }
-        
-        int len = seg.back().second - preIndex;
-        if (len >= params_.minArcLength && static_cast<int>(seg.size()) - preSegId > 1) {
-            arcs_.emplace_back(std::vector<cv::Point>(
-                edges_[i].begin() + preIndex,
-                edges_[i].begin() + seg.back().second));
-            
-            std::vector<cv::Point>& arc = arcs_.back();
-            auto v1 = arc[arc.size() / 2] - arc.front();
-            auto v2 = arc.back() - arc[arc.size() / 2];
-            if (v1.cross(v2) > 0) {
-                std::reverse(arc.begin(), arc.end());
-            }
-        }
-    }
-}
-
-// ============================================================================
-// 便捷函数接口
-// ============================================================================
-
-EdgeResult detectEdges(const cv::Mat& image, const EdgeParams& params) {
-    EdgeDetector detector(image, params);
-    
-    EdgeResult result;
-    result.edges = detector.getSegments();
-    result.smoothImage = detector.getSmoothImage();
-    result.gradImage = detector.getGradImage();
-    result.dirImage = detector.getDirImage();
-    result.width = detector.getWidth();
-    result.height = detector.getHeight();
-    
-    return result;
-}
-
-ArcResult extractArcs(const EdgeResult& edgeResult,
-                      const ArcParams& params) {
-    ArcExtractor extractor(edgeResult.edges, params);
-    extractor.extract();
-    extractor.computePolarity(edgeResult.smoothImage); // 使用平滑图像计算极性
-    
-    ArcResult result;
-    result.arcs = extractor.getArcs();
-    result.arcSegs = extractor.getArcSegs();
-    result.polarities = extractor.getPolarities();
-    
-    return result;
 }
