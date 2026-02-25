@@ -8,5 +8,7 @@ dataset/
 DATA/
 runs/
 *.zip
-*.pt
+last.pt
+yolo26n-seg.pt
+yolo26n.pt
 calibration.yaml
