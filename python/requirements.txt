@@ -1,22 +1,22 @@
-# YOLOv26 训练环境依赖
-# 要求 ultralytics>=8.4.6
-
-# 核心依赖
+# YOLO 分割训练与推理环境依赖
+# 核心框架
 ultralytics>=8.4.6
 torch>=2.0.0
 torchvision>=0.15.0
 
-# 数据处理
+# 图像处理与数学运算
 opencv-python>=4.8.0
 numpy>=1.24.0
 pillow>=10.0.0
 
-# ONNX导出
+# ONNX 相关 (导出、简化与推理)
 onnx>=1.14.0
-onnxruntime>=1.15.0
-onnxsim>=0.4.33  # ONNX模型简化
+onnxsim>=0.4.33
+# 注意：如果使用 GPU 进行 Python 推理，请将下行替换为 onnxruntime-gpu
+onnxruntime>=1.23.2
 
-# 可视化和工具
+# 实用工具
+pyyaml>=6.0
 matplotlib>=3.7.0
 tqdm>=4.65.0
-pyyaml>=6.0
+scipy>=1.10.0

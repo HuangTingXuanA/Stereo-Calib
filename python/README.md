@@ -62,6 +62,7 @@ python train.py --model runs/calibration_board/weights/best.pt --epochs 50 --img
 python train.py --model runs/calibration_board/weights/last.pt --resume
 ```
 
-## 模型
+## 模型和参考
 
 - **yolo26n-seg.pt** - 轻量级分割模型
+- 参考：https://docs.ultralytics.com/zh/

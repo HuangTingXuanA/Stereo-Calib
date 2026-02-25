@@ -10,4 +10,3 @@ runs/
 *.zip
 *.pt
 calibration.yaml
-!/python/runs/calibration_board/weights/

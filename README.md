@@ -25,13 +25,19 @@
   - **OpenCV**: 4.x
   - **ONNX Runtime**: 必须安装，用于加载 `.onnx` 模型
 
+### onnx安装
+下载包路径：https://github.com/microsoft/onnxruntime/releases
+Linux安装指令：解压tar文件
+```shell
+sudo cp -r include/* /usr/local/include
+sudo cp -P lib/libonnxruntime*.so* /usr/local/lib/
+sudo ldconfig
+```
+
 ### 编译步骤
 
 ```bash
-mkdir build
-cd build
-cmake ..
-make -j$(nproc)
+cmake --build build -j$(nproc)
 ```
 
 ## 使用方法
