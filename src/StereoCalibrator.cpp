@@ -263,11 +263,11 @@ bool StereoCalibrator::detectCircles() {
             }
             
             // 保存调试图像
-            if (!left_enough || !left_anchor_ok) {
+            if (debug_mode_ || !left_enough || !left_anchor_ok) {
                 saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
                                        "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
             }
-            if (!right_enough || !right_anchor_ok) {
+            if (debug_mode_ || !right_enough || !right_anchor_ok) {
                 saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
                                        "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
             }
@@ -443,11 +443,11 @@ bool StereoCalibrator::detectCircles() {
             if (!right_order_ok) std::cout << "  R: 网格匹配失败" << std::endl;
             
             // 保存调试图像
-            if (!left_order_ok) {
+            if (debug_mode_ || !left_order_ok) {
                 saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
                                        "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
             }
-            if (!right_order_ok) {
+            if (debug_mode_ || !right_order_ok) {
                 saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
                                        "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
             }
@@ -461,6 +461,13 @@ bool StereoCalibrator::detectCircles() {
         
         std::cout << "[" << left_filename << "] L:" << left_centers.size() 
                   << " R:" << right_centers.size() << " -> 成功" << std::endl;
+                  
+        if (debug_mode_) {
+            saveDebugImageWithMask(left_img, left_ellipses, left_mask, left_roi,
+                                   "debug_img/L_" + left_filename + "_debug.png", left_conf, left_anchors);
+            saveDebugImageWithMask(right_img, right_ellipses, right_mask, right_roi,
+                                   "debug_img/R_" + right_filename + "_debug.png", right_conf, right_anchors);
+        }
         
         valid_count++;
     }

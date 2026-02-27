@@ -68,6 +68,11 @@ public:
      */
     CalibrationResult getResult() const { return result_; }
     
+    /**
+     * @brief 设置调试模式 (输出所有调试图像)
+     */
+    void setDebugMode(bool debug) { debug_mode_ = debug; }
+    
 private:
     // ========== 辅助方法 ==========
     
@@ -124,6 +129,9 @@ private:
     std::vector<cv::Mat> tvecs_left_;
     std::vector<cv::Mat> rvecs_right_;
     std::vector<cv::Mat> tvecs_right_;
+    
+    // 调试模式
+    bool debug_mode_ = false;
 };
 
 #endif // STEREO_CALIBRATOR_H
